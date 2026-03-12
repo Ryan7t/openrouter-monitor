@@ -1,0 +1,35 @@
+# 基础调度配置。threshold_scan 会按固定周期扫描所有已绑定用户的全部 Key。
+service:
+  poll_interval_minutes: 60
+  timezone: Asia/Shanghai
+
+# 新用户默认配置。用户第一次绑定 Key 后会自动继承这组默认值。
+defaults:
+  push_time: "10:45"
+  thresholds:
+    warning: 10
+    danger: 5
+    critical: 1
+
+# 这些不是“额度阈值”本身，而是“重复通知控制”和“失败升级控制”。
+# balance_dedupe_hours:
+#   同一个 Key 已经发过一次额度告警后，至少间隔多少小时才允许再次发同级别告警。
+# failure.dedupe_hours:
+#   同一个 Key 连续报错时，至少间隔多少小时才重复发送同类错误通知。
+# failure.critical_after_failures:
+#   同一个 Key 连续失败达到多少次后，将普通错误升级为严重错误通知。
+alerts:
+  balance_dedupe_hours: 24
+  failure:
+    dedupe_hours: 24
+    critical_after_failures: 3
+
+# 飞书应用机器人配置。使用长连接接收消息，不需要公网回调地址。
+feishu:
+  app_id: cli_xxxxxxxxxxxxxxxx
+  app_secret: your-feishu-app-secret
+
+# 本地 JSON 存储。禁止替换为 SQLite/MySQL 等关系型数据库。
+state:
+  users_path: data/users.json
+  runtime_path: data/runtime_state.json
