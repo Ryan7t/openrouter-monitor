@@ -305,6 +305,32 @@ or-v1-ef1fc08d123.....7b8fd6b
 
 ## Docker
 
+推荐直接使用 Compose：
+
+```powershell
+docker compose up --build
+```
+
+后台运行：
+
+```powershell
+docker compose up -d --build
+```
+
+停止：
+
+```powershell
+docker compose down
+```
+
+当前仓库已提供 [docker-compose.yml](./docker-compose.yml)，默认会自动：
+
+- 构建 `openrouter-monitor` 镜像
+- 挂载 `./config.yaml` 到 `/app/config.yaml`
+- 挂载 `./data` 到 `/app/data`
+
+如果你仍然想手动用 `docker run`，再用下面这组命令。
+
 构建镜像：
 
 ```powershell
