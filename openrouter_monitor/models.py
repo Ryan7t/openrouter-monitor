@@ -8,6 +8,13 @@ from datetime import time
 class ServiceConfig:
     poll_interval_minutes: int
     timezone: str
+    interval_quiet_hours: QuietHoursConfig | None
+
+
+@dataclass(slots=True, frozen=True)
+class QuietHoursConfig:
+    start: time
+    end: time
 
 
 @dataclass(slots=True, frozen=True)
@@ -20,6 +27,7 @@ class UserThresholds:
 @dataclass(slots=True, frozen=True)
 class DefaultsConfig:
     push_time: time
+    push_interval_minutes: int | None
     thresholds: UserThresholds
 
 
@@ -97,4 +105,6 @@ class AccountCredits:
 @dataclass(slots=True, frozen=True)
 class UserConfigUpdate:
     push_time: time
+    push_interval_minutes: int | None
+    push_interval_quiet_hours: QuietHoursConfig | None
     thresholds: UserThresholds

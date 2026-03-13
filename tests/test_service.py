@@ -13,13 +13,14 @@ from openrouter_monitor.models import (
     FailureAlertConfig,
     FeishuConfig,
     KeyMetrics,
+    QuietHoursConfig,
     ServiceConfig,
     StateConfig,
     UserIdentity,
     UserThresholds,
 )
 from openrouter_monitor.openrouter_client import OpenRouterClientError
-from openrouter_monitor.service import MonitorService, UserCommandError
+from openrouter_monitor.service import MonitorService, SCHEDULER_MISFIRE_GRACE_SECONDS, UserCommandError
 
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -114,14 +115,16 @@ class Clock:
 
 
 class MonitorServiceTests(unittest.TestCase):
-    def make_config(self, temp_dir: str) -> AppConfig:
+    def make_config(self, temp_dir: str, interval_quiet_hours: QuietHoursConfig | None = None) -> AppConfig:
         return AppConfig(
             service=ServiceConfig(
                 poll_interval_minutes=60,
                 timezone="Asia/Shanghai",
+                interval_quiet_hours=interval_quiet_hours,
             ),
             defaults=DefaultsConfig(
                 push_time=time(hour=10, minute=45),
+                push_interval_minutes=None,
                 thresholds=UserThresholds(warning=10.0, danger=5.0, critical=1.0),
             ),
             alerts=AlertsConfig(
@@ -144,9 +147,10 @@ class MonitorServiceTests(unittest.TestCase):
         client: FakeOpenRouterClient | None = None,
         notifier: FakeNotifier | None = None,
         now_values: list[datetime] | None = None,
+        interval_quiet_hours: QuietHoursConfig | None = None,
     ) -> MonitorService:
         return MonitorService(
-            config=self.make_config(temp_dir),
+            config=self.make_config(temp_dir, interval_quiet_hours=interval_quiet_hours),
             openrouter_client=client or FakeOpenRouterClient(),
             notifier=notifier or FakeNotifier(),
             now_factory=Clock(now_values or [datetime(2026, 3, 11, 10, 0, tzinfo=TZ)]).now,
@@ -313,6 +317,24 @@ class MonitorServiceTests(unittest.TestCase):
             self.assertTrue(all(item["receive_id_type"] == "open_id" for item in notifier.messages))
             self.assertIn("OpenRouter 余额报告", notifier.messages[0]["text"])
 
+    def test_start_scheduler_configures_misfire_grace_time_for_background_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self.make_service(temp_dir)
+
+            try:
+                service.start_scheduler()
+
+                self.assertIsNotNone(service._scheduler)
+                threshold_job = service._scheduler.get_job("threshold-scan")
+                dispatch_job = service._scheduler.get_job("daily-detail-dispatch")
+
+                self.assertIsNotNone(threshold_job)
+                self.assertIsNotNone(dispatch_job)
+                self.assertEqual(threshold_job.misfire_grace_time, SCHEDULER_MISFIRE_GRACE_SECONDS)
+                self.assertEqual(dispatch_job.misfire_grace_time, SCHEDULER_MISFIRE_GRACE_SECONDS)
+            finally:
+                service.stop_scheduler()
+
     def test_push_detail_for_user_does_not_change_daily_dispatch_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             client = FakeOpenRouterClient()
@@ -333,6 +355,381 @@ class MonitorServiceTests(unittest.TestCase):
             self.assertTrue(success)
             self.assertEqual(notifier.messages[0]["receive_id"], "ou_1")
             self.assertEqual(service.runtime_store.load()["users"], {})
+
+    def test_push_detail_for_user_does_not_change_interval_dispatch_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = FakeOpenRouterClient()
+            client.key_responses["or-v1-abc"] = [build_metrics(12.0)]
+            client.credits_responses["or-v1-abc"] = [FakeCredits(100.0, 50.0)]
+            notifier = FakeNotifier()
+            service = self.make_service(
+                temp_dir,
+                client=client,
+                notifier=notifier,
+                now_values=[
+                    datetime(2026, 3, 11, 9, 0, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 5, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 6, tzinfo=TZ),
+                ],
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+            service.update_push_interval(identity, 30)
+            before_push_detail = service.runtime_store.load()["users"]["ou_1"]["next_interval_push_at"]
+
+            success = service.push_detail_for_user("ou_1")
+
+            self.assertTrue(success)
+            self.assertEqual(
+                service.runtime_store.load()["users"]["ou_1"]["next_interval_push_at"],
+                before_push_detail,
+            )
+
+    def test_interval_dispatch_starts_from_update_time_and_repeats_by_minutes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = FakeOpenRouterClient()
+            client.key_responses["or-v1-abc"] = [
+                build_metrics(12.0),
+                build_metrics(12.0),
+            ]
+            client.credits_responses["or-v1-abc"] = [
+                FakeCredits(100.0, 50.0),
+                FakeCredits(100.0, 50.0),
+            ]
+            notifier = FakeNotifier()
+            service = self.make_service(
+                temp_dir,
+                client=client,
+                notifier=notifier,
+                now_values=[
+                    datetime(2026, 3, 11, 9, 0, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 5, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 34, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 35, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 35, tzinfo=TZ),
+                    datetime(2026, 3, 11, 10, 4, tzinfo=TZ),
+                    datetime(2026, 3, 11, 10, 5, tzinfo=TZ),
+                    datetime(2026, 3, 11, 10, 5, tzinfo=TZ),
+                ],
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+            service.update_push_interval(identity, 30)
+
+            service.daily_detail_dispatch()
+            service.daily_detail_dispatch()
+            service.daily_detail_dispatch()
+            service.daily_detail_dispatch()
+
+            self.assertEqual(len(notifier.messages), 2)
+            runtime_user = service.runtime_store.load()["users"]["ou_1"]
+            self.assertEqual(
+                datetime.fromisoformat(runtime_user["next_interval_push_at"]),
+                datetime(2026, 3, 11, 10, 35, tzinfo=TZ),
+            )
+
+    def test_one_minute_interval_stays_minute_aligned_when_dispatch_runs_seconds_late(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = FakeOpenRouterClient()
+            client.key_responses["or-v1-abc"] = [
+                build_metrics(12.0),
+                build_metrics(12.0),
+            ]
+            client.credits_responses["or-v1-abc"] = [
+                FakeCredits(100.0, 50.0),
+                FakeCredits(100.0, 50.0),
+            ]
+            notifier = FakeNotifier()
+            service = self.make_service(
+                temp_dir,
+                client=client,
+                notifier=notifier,
+                now_values=[
+                    datetime(2026, 3, 11, 9, 0, 2, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 0, 2, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 1, 2, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 1, 2, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 2, 2, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 2, 2, tzinfo=TZ),
+                ],
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+            service.update_push_interval(identity, 1)
+
+            runtime_user = service.runtime_store.load()["users"]["ou_1"]
+            self.assertEqual(
+                datetime.fromisoformat(runtime_user["next_interval_push_at"]),
+                datetime(2026, 3, 11, 9, 1, 0, tzinfo=TZ),
+            )
+
+            service.daily_detail_dispatch()
+            service.daily_detail_dispatch()
+
+            self.assertEqual(len(notifier.messages), 2)
+            runtime_user = service.runtime_store.load()["users"]["ou_1"]
+            self.assertEqual(
+                datetime.fromisoformat(runtime_user["next_interval_push_at"]),
+                datetime(2026, 3, 11, 9, 3, 0, tzinfo=TZ),
+            )
+
+    def test_interval_dispatch_skips_during_personal_quiet_hours_and_resumes_after_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = FakeOpenRouterClient()
+            client.key_responses["or-v1-abc"] = [build_metrics(12.0)]
+            client.credits_responses["or-v1-abc"] = [FakeCredits(100.0, 50.0)]
+            notifier = FakeNotifier()
+            service = self.make_service(
+                temp_dir,
+                client=client,
+                notifier=notifier,
+                now_values=[
+                    datetime(2026, 3, 11, 22, 55, tzinfo=TZ),
+                    datetime(2026, 3, 11, 22, 55, tzinfo=TZ),
+                    datetime(2026, 3, 11, 23, 10, tzinfo=TZ),
+                    datetime(2026, 3, 12, 8, 0, tzinfo=TZ),
+                    datetime(2026, 3, 12, 8, 0, tzinfo=TZ),
+                ],
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+            service.update_push_interval(identity, 15)
+            service.update_push_interval_quiet_hours(
+                identity,
+                QuietHoursConfig(start=time(hour=23, minute=0), end=time(hour=8, minute=0)),
+            )
+
+            service.daily_detail_dispatch()
+            runtime_user = service.runtime_store.load()["users"]["ou_1"]
+            self.assertEqual(notifier.messages, [])
+            self.assertEqual(
+                datetime.fromisoformat(runtime_user["next_interval_push_at"]),
+                datetime(2026, 3, 12, 8, 0, tzinfo=TZ),
+            )
+
+            service.daily_detail_dispatch()
+
+            self.assertEqual(len(notifier.messages), 1)
+            runtime_user = service.runtime_store.load()["users"]["ou_1"]
+            self.assertEqual(
+                datetime.fromisoformat(runtime_user["next_interval_push_at"]),
+                datetime(2026, 3, 12, 8, 15, tzinfo=TZ),
+            )
+
+    def test_daily_push_is_not_blocked_by_personal_interval_quiet_hours(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = FakeOpenRouterClient()
+            client.key_responses["or-v1-abc"] = [build_metrics(12.0)]
+            client.credits_responses["or-v1-abc"] = [FakeCredits(100.0, 50.0)]
+            notifier = FakeNotifier()
+            service = self.make_service(
+                temp_dir,
+                client=client,
+                notifier=notifier,
+                now_values=[
+                    datetime(2026, 3, 11, 22, 50, tzinfo=TZ),
+                    datetime(2026, 3, 11, 23, 5, tzinfo=TZ),
+                    datetime(2026, 3, 11, 23, 5, tzinfo=TZ),
+                ],
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+            service.update_push_time(identity, time(hour=23, minute=5))
+            service.update_push_interval_quiet_hours(
+                identity,
+                QuietHoursConfig(start=time(hour=23, minute=0), end=time(hour=8, minute=0)),
+            )
+
+            service.daily_detail_dispatch()
+
+            self.assertEqual(len(notifier.messages), 1)
+            self.assertIn("OpenRouter 余额报告", notifier.messages[0]["text"])
+
+    def test_get_user_config_message_displays_default_interval_quiet_hours(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self.make_service(
+                temp_dir,
+                interval_quiet_hours=QuietHoursConfig(start=time(hour=23, minute=0), end=time(hour=8, minute=0)),
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+            service.update_push_interval(identity, 30)
+
+            message = service.get_user_config_message("ou_1")
+
+            self.assertIn("免打扰时段: 23:00 - 08:00", message)
+
+    def test_get_user_config_message_hides_quiet_hours_when_interval_push_off(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self.make_service(
+                temp_dir,
+                interval_quiet_hours=QuietHoursConfig(start=time(hour=23, minute=0), end=time(hour=8, minute=0)),
+            )
+
+            message = service.get_user_config_message("ou_1")
+
+            self.assertNotIn("免打扰时段", message)
+
+    def test_user_can_disable_default_interval_quiet_hours(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = FakeOpenRouterClient()
+            client.key_responses["or-v1-abc"] = [build_metrics(12.0)]
+            client.credits_responses["or-v1-abc"] = [FakeCredits(100.0, 50.0)]
+            notifier = FakeNotifier()
+            service = self.make_service(
+                temp_dir,
+                client=client,
+                notifier=notifier,
+                now_values=[
+                    datetime(2026, 3, 11, 22, 55, tzinfo=TZ),
+                    datetime(2026, 3, 11, 22, 55, tzinfo=TZ),
+                    datetime(2026, 3, 11, 23, 10, tzinfo=TZ),
+                    datetime(2026, 3, 11, 23, 10, tzinfo=TZ),
+                ],
+                interval_quiet_hours=QuietHoursConfig(start=time(hour=23, minute=0), end=time(hour=8, minute=0)),
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+            service.update_push_interval(identity, 15)
+            service.update_push_interval_quiet_hours(identity, None)
+
+            message = service.get_user_config_message("ou_1")
+            service.daily_detail_dispatch()
+
+            self.assertIn("免打扰时段: 未开启", message)
+            self.assertEqual(len(notifier.messages), 1)
+            runtime_user = service.runtime_store.load()["users"]["ou_1"]
+            self.assertEqual(
+                datetime.fromisoformat(runtime_user["next_interval_push_at"]),
+                datetime(2026, 3, 11, 23, 25, tzinfo=TZ),
+            )
+
+    def test_update_push_interval_can_disable_interval_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            notifier = FakeNotifier()
+            service = self.make_service(
+                temp_dir,
+                notifier=notifier,
+                now_values=[
+                    datetime(2026, 3, 11, 9, 0, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 5, tzinfo=TZ),
+                ],
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+            service.update_push_interval(identity, 30)
+
+            message = service.update_push_interval(identity, None)
+
+            self.assertIn("间隔推送", message)
+            runtime_user = service.runtime_store.load()["users"]["ou_1"]
+            self.assertIsNone(runtime_user["next_interval_push_at"])
+            service.daily_detail_dispatch()
+            self.assertEqual(notifier.messages, [])
+
+    def test_interval_and_daily_dispatch_can_both_send_in_same_minute(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = FakeOpenRouterClient()
+            client.key_responses["or-v1-abc"] = [build_metrics(12.0)]
+            client.credits_responses["or-v1-abc"] = [FakeCredits(100.0, 50.0)]
+            notifier = FakeNotifier()
+            service = self.make_service(
+                temp_dir,
+                client=client,
+                notifier=notifier,
+                now_values=[
+                    datetime(2026, 3, 11, 9, 0, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 0, tzinfo=TZ),
+                    datetime(2026, 3, 11, 10, 0, tzinfo=TZ),
+                    datetime(2026, 3, 11, 10, 0, tzinfo=TZ),
+                ],
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+            service.update_push_time(identity, time(hour=10, minute=0))
+            service.update_push_interval(identity, 60)
+
+            service.daily_detail_dispatch()
+
+            self.assertEqual(len(notifier.messages), 2)
+            self.assertTrue(all(item["text"] == notifier.messages[0]["text"] for item in notifier.messages))
+
+    def test_interval_dispatch_retries_after_failure_without_advancing_schedule(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = FakeOpenRouterClient()
+            client.key_responses["or-v1-abc"] = [
+                build_metrics(12.0),
+                build_metrics(12.0),
+            ]
+            client.credits_responses["or-v1-abc"] = [
+                FakeCredits(100.0, 50.0),
+                FakeCredits(100.0, 50.0),
+            ]
+            notifier = FakeNotifier(outcomes=[False, True])
+            service = self.make_service(
+                temp_dir,
+                client=client,
+                notifier=notifier,
+                now_values=[
+                    datetime(2026, 3, 11, 9, 0, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 0, tzinfo=TZ),
+                    datetime(2026, 3, 11, 10, 0, tzinfo=TZ),
+                    datetime(2026, 3, 11, 10, 0, tzinfo=TZ),
+                    datetime(2026, 3, 11, 10, 1, tzinfo=TZ),
+                    datetime(2026, 3, 11, 10, 1, tzinfo=TZ),
+                ],
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+            service.update_push_interval(identity, 60)
+
+            service.daily_detail_dispatch()
+            failed_schedule = service.runtime_store.load()["users"]["ou_1"]["next_interval_push_at"]
+            service.daily_detail_dispatch()
+
+            self.assertEqual(len(notifier.messages), 2)
+            self.assertEqual(
+                datetime.fromisoformat(failed_schedule),
+                datetime(2026, 3, 11, 10, 0, tzinfo=TZ),
+            )
+            runtime_user = service.runtime_store.load()["users"]["ou_1"]
+            self.assertEqual(
+                datetime.fromisoformat(runtime_user["next_interval_push_at"]),
+                datetime(2026, 3, 11, 11, 1, tzinfo=TZ),
+            )
+
+    def test_interval_schedule_starts_when_first_key_is_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = FakeOpenRouterClient()
+            client.key_responses["or-v1-abc"] = [build_metrics(12.0)]
+            client.credits_responses["or-v1-abc"] = [FakeCredits(100.0, 50.0)]
+            notifier = FakeNotifier()
+            service = self.make_service(
+                temp_dir,
+                client=client,
+                notifier=notifier,
+                now_values=[
+                    datetime(2026, 3, 11, 9, 0, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 10, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 39, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 40, tzinfo=TZ),
+                    datetime(2026, 3, 11, 9, 40, tzinfo=TZ),
+                ],
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.update_push_interval(identity, 30)
+            service.bind_key(identity, "or-v1-abc", "生产")
+
+            runtime_user = service.runtime_store.load()["users"]["ou_1"]
+            self.assertEqual(
+                datetime.fromisoformat(runtime_user["next_interval_push_at"]),
+                datetime(2026, 3, 11, 9, 40, tzinfo=TZ),
+            )
+
+            service.daily_detail_dispatch()
+            service.daily_detail_dispatch()
+
+            self.assertEqual(len(notifier.messages), 1)
 
     def test_update_thresholds_are_isolated_per_user(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

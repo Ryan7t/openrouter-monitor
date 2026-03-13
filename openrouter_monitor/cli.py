@@ -9,6 +9,9 @@ from .config import ConfigError, load_config
 from .service import MonitorService, UserCommandError
 
 
+DEBUG_PUSH_FOOTER = "开发调试，如果不是开发请忽略"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="OpenRouter 用户中心化飞书机器人")
     parser.add_argument("--config", required=True, help="YAML 配置文件路径。")
@@ -69,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.push_text:
             open_id = args.user_open_id or service.resolve_stored_user_open_id()
-            success = service.push_private_text(open_id, args.push_text)
+            success = service.push_private_text(open_id, _build_debug_push_text(args.push_text))
             if success:
                 print("主动消息发送成功。")
                 return 0
@@ -103,3 +106,10 @@ def configure_logging() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         stream=sys.stdout,
     )
+
+
+def _build_debug_push_text(text: str) -> str:
+    normalized = text.rstrip()
+    if normalized.endswith(DEBUG_PUSH_FOOTER):
+        return normalized
+    return f"{normalized}\n\n{DEBUG_PUSH_FOOTER}"

@@ -10,7 +10,7 @@ import lark_oapi as lark
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
 from .messages import build_help_message
-from .models import UserIdentity
+from .models import QuietHoursConfig, UserIdentity
 from .service import MonitorService, UserCommandError
 from .utils import parse_time_value
 
@@ -114,6 +114,39 @@ class FeishuCommandProcessor:
             except ValueError as exc:
                 raise UserCommandError("时间格式不对，请使用类似 09:00、22:30 的格式。") from exc
             return self.service.update_push_time(identity, push_time)
+        if action == "interval":
+            if not tail:
+                raise UserCommandError("请指定分钟数，例如: /配置 间隔 30，或使用 /配置 间隔 关闭")
+            if tail in {"关闭", "off", "disable"}:
+                return self.service.update_push_interval(identity, None)
+            try:
+                minutes = int(tail)
+            except ValueError as exc:
+                raise UserCommandError("间隔分钟必须是大于 0 的整数，例如: 30") from exc
+            if minutes <= 0:
+                raise UserCommandError("间隔分钟必须是大于 0 的整数，例如: 30")
+            return self.service.update_push_interval(identity, minutes)
+        if action == "interval_quiet_hours":
+            if not tail:
+                raise UserCommandError(
+                    "请指定静默时间段，例如: /配置 间隔静默 23:00 08:00，或使用 /配置 间隔静默 关闭"
+                )
+            if tail in {"关闭", "off", "disable"}:
+                return self.service.update_push_interval_quiet_hours(identity, None)
+            time_tokens = tail.split()
+            if len(time_tokens) != 2:
+                raise UserCommandError("静默时间段需要开始和结束两个时间，例如: /配置 间隔静默 23:00 08:00")
+            try:
+                start_time = parse_time_value(time_tokens[0])
+                end_time = parse_time_value(time_tokens[1])
+            except ValueError as exc:
+                raise UserCommandError("时间格式不对，请使用类似 23:00 08:00 的格式。") from exc
+            if start_time == end_time:
+                raise UserCommandError("静默时间段的开始和结束时间不能相同。")
+            return self.service.update_push_interval_quiet_hours(
+                identity,
+                QuietHoursConfig(start=start_time, end=end_time),
+            )
         if action in {"warning", "danger", "critical"}:
             if not tail:
                 raise UserCommandError(f"请指定金额，例如: /配置 {tokens[0]} 10")
@@ -208,6 +241,12 @@ CONFIG_ACTION_ALIASES = {
     "show": "view",
     "推送时间": "time",
     "time": "time",
+    "间隔": "interval",
+    "interval": "interval",
+    "间隔静默": "interval_quiet_hours",
+    "静默时间": "interval_quiet_hours",
+    "quiethours": "interval_quiet_hours",
+    "quiet-hours": "interval_quiet_hours",
     "warning": "warning",
     "警告": "warning",
     "danger": "danger",

@@ -105,7 +105,10 @@ class CliTests(unittest.TestCase):
             result = cli.main(["--config", "config.yaml", "--push-text", "主动测试消息", "--user-open-id", "ou_123"])
 
         self.assertEqual(result, 0)
-        self.assertEqual(fake_service.push_calls, [("ou_123", "主动测试消息")])
+        self.assertEqual(
+            fake_service.push_calls,
+            [("ou_123", "主动测试消息\n\n开发调试，如果不是开发请忽略")],
+        )
         self.assertIn("主动消息发送成功", stdout.getvalue())
 
     def test_main_pushes_detail_for_specific_user_and_exits(self) -> None:

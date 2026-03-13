@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -21,7 +21,7 @@ from .messages import (
     build_no_keys_message,
     build_threshold_alert_message,
 )
-from .models import AppConfig, KeyMetrics, UserIdentity, UserThresholds
+from .models import AppConfig, KeyMetrics, QuietHoursConfig, UserIdentity, UserThresholds
 from .openrouter_client import OpenRouterClient, OpenRouterClientError
 from .state_store import RuntimeStateStore, UserStore
 from .utils import (
@@ -37,6 +37,7 @@ from .utils import (
 
 
 LOGGER = logging.getLogger(__name__)
+SCHEDULER_MISFIRE_GRACE_SECONDS = 60
 
 
 class UserCommandError(ValueError):
@@ -80,6 +81,7 @@ class MonitorService:
             id="threshold-scan",
             max_instances=1,
             coalesce=True,
+            misfire_grace_time=SCHEDULER_MISFIRE_GRACE_SECONDS,
         )
         scheduler.add_job(
             self.safe_daily_detail_dispatch,
@@ -88,6 +90,7 @@ class MonitorService:
             id="daily-detail-dispatch",
             max_instances=1,
             coalesce=True,
+            misfire_grace_time=SCHEDULER_MISFIRE_GRACE_SECONDS,
         )
         scheduler.start()
         self._scheduler = scheduler
@@ -127,6 +130,7 @@ class MonitorService:
             self._merge_identity(user_entry, identity)
             self._ensure_user_defaults(user_entry)
             keys = self._get_key_records(user_entry)
+            had_keys_before = bool(keys)
             self._assert_alias_available(keys, normalized_alias, key_id)
 
             existing = next((item for item in keys if item.get("key_id") == key_id), None)
@@ -151,11 +155,22 @@ class MonitorService:
             self.user_store.save(state)
 
         push_time = self._read_push_time(self._ensure_settings_mapping(user_entry))
+        push_interval_minutes = self._read_push_interval_minutes(self._ensure_settings_mapping(user_entry))
+        push_interval_quiet_hours = self._read_push_interval_quiet_hours(
+            self._ensure_settings_mapping(user_entry)
+        )
         thresholds = self._read_thresholds(self._ensure_settings_mapping(user_entry))
+        if not had_keys_before and push_interval_minutes is not None:
+            self._set_next_interval_push_at(
+                identity.open_id,
+                self._calculate_next_interval_push_at(now, push_interval_minutes),
+            )
         return build_bind_success_message(
             alias=existing.get("alias"),
             masked_key=mask_api_key(normalized_key),
             push_time=push_time,
+            push_interval_minutes=push_interval_minutes,
+            interval_quiet_hours=push_interval_quiet_hours,
             thresholds=thresholds,
             existed=existed,
         )
@@ -202,6 +217,8 @@ class MonitorService:
             if user_entry is None:
                 return build_config_message(
                     push_time=self.config.defaults.push_time,
+                    push_interval_minutes=self.config.defaults.push_interval_minutes,
+                    interval_quiet_hours=self.config.service.interval_quiet_hours,
                     thresholds=self.config.defaults.thresholds,
                     push_enabled=False,
                     key_count=0,
@@ -209,6 +226,8 @@ class MonitorService:
             settings = self._ensure_settings_mapping(user_entry)
             return build_config_message(
                 push_time=self._read_push_time(settings),
+                push_interval_minutes=self._read_push_interval_minutes(settings),
+                interval_quiet_hours=self._read_push_interval_quiet_hours(settings),
                 thresholds=self._read_thresholds(settings),
                 push_enabled=bool(settings.get("push_enabled", False)),
                 key_count=len(self._get_key_records(user_entry)),
@@ -222,6 +241,46 @@ class MonitorService:
             settings["push_time"] = format_hhmm(push_time)
             self.user_store.save(state)
         return build_config_updated_message("每日推送时间", format_hhmm(push_time))
+
+    def update_push_interval(self, identity: UserIdentity, minutes: int | None) -> str:
+        now = self.now_factory()
+        with self._user_lock:
+            state = self.user_store.load()
+            user_entry = self._ensure_user_entry(state, identity)
+            settings = self._ensure_settings_mapping(user_entry)
+            settings["push_interval_minutes"] = minutes
+            can_schedule = bool(settings.get("push_enabled", False)) and bool(self._get_key_records(user_entry))
+            self.user_store.save(state)
+
+        if minutes is None:
+            self._clear_next_interval_push_at(identity.open_id)
+            return build_config_updated_message("间隔推送", "已关闭")
+
+        if can_schedule:
+            self._set_next_interval_push_at(
+                identity.open_id,
+                self._calculate_next_interval_push_at(now, minutes),
+            )
+        return build_config_updated_message("间隔推送", f"每 {minutes} 分钟一次")
+
+    def update_push_interval_quiet_hours(
+        self,
+        identity: UserIdentity,
+        quiet_hours: QuietHoursConfig | None,
+    ) -> str:
+        with self._user_lock:
+            state = self.user_store.load()
+            user_entry = self._ensure_user_entry(state, identity)
+            settings = self._ensure_settings_mapping(user_entry)
+            settings["push_interval_quiet_hours"] = self._serialize_interval_quiet_hours(quiet_hours)
+            self.user_store.save(state)
+
+        if quiet_hours is None:
+            return build_config_updated_message("免打扰时段", "已关闭")
+        return build_config_updated_message(
+            "免打扰时段",
+            f"{format_hhmm(quiet_hours.start)} - {format_hhmm(quiet_hours.end)}",
+        )
 
     def update_threshold(self, identity: UserIdentity, level: str, amount: float) -> str:
         if amount < 0:
@@ -259,6 +318,8 @@ class MonitorService:
                 return build_no_keys_message()
             settings = self._ensure_settings_mapping(user_entry)
             push_time = self._read_push_time(settings)
+            push_interval_minutes = self._read_push_interval_minutes(settings)
+            push_interval_quiet_hours = self._read_push_interval_quiet_hours(settings)
             key_records = [dict(item) for item in self._get_key_records(user_entry)]
 
         checked_at = self.now_factory()
@@ -296,6 +357,8 @@ class MonitorService:
             checked_at=checked_at,
             key_sections=key_sections,
             push_time=push_time,
+            push_interval_minutes=push_interval_minutes,
+            interval_quiet_hours=push_interval_quiet_hours,
         )
 
     def threshold_scan(self) -> None:
@@ -353,19 +416,43 @@ class MonitorService:
                     continue
                 if not self._get_key_records(user_entry):
                     continue
-                push_time = self._read_push_time(settings)
-                if push_time.hour != now.hour or push_time.minute != now.minute:
-                    continue
 
                 runtime_user = self._ensure_runtime_user(runtime_state, open_id)
-                last_daily_push_date = parse_iso_date(runtime_user.get("last_daily_push_date"))
-                if last_daily_push_date == now.date():
-                    continue
+                report: str | None = None
 
-                report = self.inspect_user(open_id)
-                sent = self.push_private_text(open_id, report)
-                if sent:
-                    runtime_user["last_daily_push_date"] = current_date
+                push_time = self._read_push_time(settings)
+                push_interval_quiet_hours = self._read_push_interval_quiet_hours(settings)
+                last_daily_push_date = parse_iso_date(runtime_user.get("last_daily_push_date"))
+                daily_due = (
+                    push_time.hour == now.hour
+                    and push_time.minute == now.minute
+                    and last_daily_push_date != now.date()
+                )
+                if daily_due:
+                    report = report or self.inspect_user(open_id)
+                    sent = self.push_private_text(open_id, report)
+                    if sent:
+                        runtime_user["last_daily_push_date"] = current_date
+
+                push_interval_minutes = self._read_push_interval_minutes(settings)
+                next_interval_push_at = parse_datetime(runtime_user.get("next_interval_push_at"))
+                interval_due = (
+                    push_interval_minutes is not None
+                    and next_interval_push_at is not None
+                    and now >= next_interval_push_at
+                )
+                if interval_due:
+                    if self._is_interval_quiet_hours_active(now, push_interval_quiet_hours):
+                        runtime_user["next_interval_push_at"] = iso_or_none(
+                            self._next_interval_dispatch_after_quiet_hours(now, push_interval_quiet_hours)
+                        )
+                    else:
+                        report = report or self.inspect_user(open_id)
+                        sent = self.push_private_text(open_id, report)
+                        if sent:
+                            runtime_user["next_interval_push_at"] = iso_or_none(
+                                self._calculate_next_interval_push_at(now, push_interval_minutes)
+                            )
 
             self._save_runtime_state(runtime_state)
             LOGGER.info("Completed daily detail dispatch at %s", now.isoformat())
@@ -630,6 +717,10 @@ class MonitorService:
         return {
             "push_enabled": False,
             "push_time": format_hhmm(self.config.defaults.push_time),
+            "push_interval_minutes": self.config.defaults.push_interval_minutes,
+            "push_interval_quiet_hours": self._serialize_interval_quiet_hours(
+                self.config.service.interval_quiet_hours
+            ),
             "thresholds": {
                 "warning": self.config.defaults.thresholds.warning,
                 "danger": self.config.defaults.thresholds.danger,
@@ -659,6 +750,11 @@ class MonitorService:
             user_entry["settings"] = settings
         settings.setdefault("push_enabled", False)
         settings.setdefault("push_time", format_hhmm(self.config.defaults.push_time))
+        settings.setdefault("push_interval_minutes", None)
+        settings.setdefault(
+            "push_interval_quiet_hours",
+            self._serialize_interval_quiet_hours(self.config.service.interval_quiet_hours),
+        )
         threshold_mapping = settings.setdefault("thresholds", {})
         if not isinstance(threshold_mapping, dict):
             threshold_mapping = {}
@@ -676,6 +772,92 @@ class MonitorService:
             except ValueError:
                 return self.config.defaults.push_time
         return self.config.defaults.push_time
+
+    def _read_push_interval_minutes(self, settings: dict[str, Any]) -> int | None:
+        if "push_interval_minutes" not in settings:
+            return None
+
+        raw = settings.get("push_interval_minutes")
+        if raw is None or isinstance(raw, bool):
+            return None
+
+        if isinstance(raw, int):
+            minutes = raw
+        elif isinstance(raw, str):
+            try:
+                minutes = int(raw.strip())
+            except ValueError:
+                return None
+        else:
+            return None
+
+        if minutes <= 0:
+            return None
+        return minutes
+
+    def _serialize_interval_quiet_hours(
+        self,
+        quiet_hours: QuietHoursConfig | None,
+    ) -> dict[str, str] | None:
+        if quiet_hours is None:
+            return None
+        return {
+            "start": format_hhmm(quiet_hours.start),
+            "end": format_hhmm(quiet_hours.end),
+        }
+
+    def _read_push_interval_quiet_hours(self, settings: dict[str, Any]) -> QuietHoursConfig | None:
+        raw = settings.get("push_interval_quiet_hours", self._serialize_interval_quiet_hours(
+            self.config.service.interval_quiet_hours
+        ))
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            return self.config.service.interval_quiet_hours
+
+        try:
+            start = parse_time_value(str(raw.get("start", "")).strip())
+            end = parse_time_value(str(raw.get("end", "")).strip())
+        except ValueError:
+            return self.config.service.interval_quiet_hours
+        if start == end:
+            return self.config.service.interval_quiet_hours
+        return QuietHoursConfig(start=start, end=end)
+
+    def _calculate_next_interval_push_at(self, base: datetime, minutes: int) -> datetime:
+        aligned_base = base.replace(second=0, microsecond=0)
+        return aligned_base + timedelta(minutes=minutes)
+
+    def _is_interval_quiet_hours_active(
+        self,
+        now: datetime,
+        quiet_hours: QuietHoursConfig | None,
+    ) -> bool:
+        if quiet_hours is None:
+            return False
+
+        current = now.timetz().replace(tzinfo=None)
+        if quiet_hours.start < quiet_hours.end:
+            return quiet_hours.start <= current < quiet_hours.end
+        return current >= quiet_hours.start or current < quiet_hours.end
+
+    def _next_interval_dispatch_after_quiet_hours(
+        self,
+        now: datetime,
+        quiet_hours: QuietHoursConfig | None,
+    ) -> datetime:
+        if quiet_hours is None:
+            return now
+
+        current = now.timetz().replace(tzinfo=None)
+        if quiet_hours.start < quiet_hours.end:
+            resume_date = now.date()
+        elif current < quiet_hours.end:
+            resume_date = now.date()
+        else:
+            resume_date = now.date() + timedelta(days=1)
+
+        return datetime.combine(resume_date, quiet_hours.end, tzinfo=self.zoneinfo)
 
     def _read_thresholds(self, settings: dict[str, Any]) -> UserThresholds:
         raw = settings.get("thresholds")
@@ -749,10 +931,11 @@ class MonitorService:
             runtime_state["users"] = users
         runtime_user = users.get(open_id)
         if not isinstance(runtime_user, dict):
-            runtime_user = {"keys": {}, "last_daily_push_date": None}
+            runtime_user = {"keys": {}, "last_daily_push_date": None, "next_interval_push_at": None}
             users[open_id] = runtime_user
         runtime_user.setdefault("keys", {})
         runtime_user.setdefault("last_daily_push_date", None)
+        runtime_user.setdefault("next_interval_push_at", None)
         return runtime_user
 
     def _ensure_runtime_key(self, runtime_state: dict[str, Any], open_id: str, key_id: str) -> dict[str, Any]:
@@ -766,6 +949,22 @@ class MonitorService:
             runtime_key = {"balance_alert": None, "failure": None}
             runtime_keys[key_id] = runtime_key
         return runtime_key
+
+    def _set_next_interval_push_at(self, open_id: str, next_push_at: datetime) -> None:
+        with self._runtime_lock:
+            runtime_state = self.runtime_store.load()
+            runtime_user = self._ensure_runtime_user(runtime_state, open_id)
+            runtime_user["next_interval_push_at"] = iso_or_none(next_push_at)
+            self.runtime_store.save(runtime_state)
+
+    def _clear_next_interval_push_at(self, open_id: str) -> None:
+        with self._runtime_lock:
+            runtime_state = self.runtime_store.load()
+            runtime_user = self._get_runtime_user(runtime_state, open_id)
+            if runtime_user is None:
+                return
+            runtime_user["next_interval_push_at"] = None
+            self.runtime_store.save(runtime_state)
 
     def _now(self) -> datetime:
         return datetime.now(self.zoneinfo)

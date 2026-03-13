@@ -2,36 +2,45 @@ from __future__ import annotations
 
 from datetime import datetime, time
 
-from .models import AccountCredits, KeyMetrics, UserThresholds
+from .models import AccountCredits, KeyMetrics, QuietHoursConfig, UserThresholds
 from .utils import format_currency, format_hhmm, format_local_datetime
+
+LABEL_QUIET_HOURS = "免打扰时段"
 
 
 def build_help_message() -> str:
-    return "\n".join(
-        [
-            "OpenRouter Monitor 使用指南",
-            "",
-            "查看报告",
-            "  /详细 — 查看所有 Key 的余额和用量",
-            "",
-            "管理 Key",
-            "  /绑定 <Key> <备注名> — 添加一个 Key（备注名可选）",
-            "  /删除 <备注名或完整Key> — 删除已绑定的 Key",
-            "",
-            "个人设置",
-            "  /配置 — 查看当前设置",
-            "  /配置 推送时间 09:00 — 修改每日推送时间",
-            "  余额提醒（分三级，余额降到设定金额时通知你）：",
-            "  /配置 警告 10 — 余额低于 $10 时，轻度提醒",
-            "  /配置 危险 5 — 余额低于 $5 时，较强提醒",
-            "  /配置 严重 1 — 余额低于 $1 时，紧急提醒",
-            "",
-            "/帮助 — 查看本指南",
-            "",
-            "群聊中请先 @机器人 再发送指令，私聊直接发送即可。",
-            "也支持英文指令：/detail /bind /delete /config /help",
-        ]
-    )
+    lines = [
+        "OpenRouter Monitor 使用指南",
+        "",
+        "查看报告",
+        "  /详细 — 查看所有 Key 的余额和用量",
+        "",
+        "管理 Key",
+        "  /绑定 <Key> <备注名> — 添加一个 Key（备注名可选）",
+        "  /删除 <备注名或完整Key> — 删除已绑定的 Key",
+        "",
+        "推送设置",
+        "  /配置 推送时间 09:00 — 设置每日报告的推送时间",
+        "  /配置 间隔 30 — 开启间隔推送，每 30 分钟自动推送一次余额报告",
+        "  /配置 间隔 关闭 — 关闭间隔推送",
+        "  /配置 间隔静默 23:00 08:00 — 设置免打扰时段，该时段内暂停间隔推送",
+        "  /配置 间隔静默 关闭 — 关闭免打扰时段",
+        "  说明: 每日推送在固定时间发送一次汇总；间隔推送在此基础上额外按设定频率推送。",
+        "  免打扰时段仅影响间隔推送，不影响每日推送。",
+        "",
+        "余额提醒（余额降到设定值时自动通知）",
+        "  /配置 警告 10 — 余额低于 $10 时提醒",
+        "  /配置 危险 5 — 余额低于 $5 时提醒",
+        "  /配置 严重 1 — 余额低于 $1 时提醒",
+        "",
+        "其他",
+        "  /配置 — 查看当前所有设置",
+        "  /帮助 — 查看本指南",
+        "",
+        "群聊中请先 @机器人 再发送指令，私聊直接发送即可。",
+        "也支持英文指令：/detail /bind /delete /config /help",
+    ]
+    return "\n".join(lines)
 
 
 def build_no_keys_message() -> str:
@@ -44,10 +53,24 @@ def _format_key_line(alias: str | None, masked_key: str) -> str:
     return f"Key: {masked_key}"
 
 
+def format_push_interval_status(push_interval_minutes: int | None) -> str:
+    if push_interval_minutes is None:
+        return "未开启"
+    return f"每 {push_interval_minutes} 分钟一次"
+
+
+def format_interval_quiet_hours_status(interval_quiet_hours: QuietHoursConfig | None) -> str:
+    if interval_quiet_hours is None:
+        return "未开启"
+    return f"{format_hhmm(interval_quiet_hours.start)} - {format_hhmm(interval_quiet_hours.end)}"
+
+
 def build_bind_success_message(
     alias: str | None,
     masked_key: str,
     push_time: time,
+    push_interval_minutes: int | None,
+    interval_quiet_hours: QuietHoursConfig | None,
     thresholds: UserThresholds,
     existed: bool,
 ) -> str:
@@ -57,6 +80,8 @@ def build_bind_success_message(
         [
             "",
             f"每日推送时间: {format_hhmm(push_time)}",
+            f"间隔推送: {format_push_interval_status(push_interval_minutes)}",
+            f"免打扰时段: {format_interval_quiet_hours_status(interval_quiet_hours)}",
             f"余额提醒: 警告 {format_currency(thresholds.warning)}"
             f" / 危险 {format_currency(thresholds.danger)}"
             f" / 严重 {format_currency(thresholds.critical)}",
@@ -77,13 +102,25 @@ def build_delete_success_message(alias: str | None, masked_key: str, push_enable
     return "\n".join(lines)
 
 
-def build_config_message(push_time: time, thresholds: UserThresholds, push_enabled: bool, key_count: int) -> str:
-    return "\n".join(
+def build_config_message(
+    push_time: time,
+    push_interval_minutes: int | None,
+    interval_quiet_hours: QuietHoursConfig | None,
+    thresholds: UserThresholds,
+    push_enabled: bool,
+    key_count: int,
+) -> str:
+    lines = [
+        "当前设置",
+        f"已绑定 Key: {key_count} 个",
+        f"每日推送: {'已开启' if push_enabled else '未开启'}",
+        f"每日推送时间: {format_hhmm(push_time)}",
+        f"间隔推送: {format_push_interval_status(push_interval_minutes)}",
+    ]
+    if push_interval_minutes is not None:
+        lines.append(f"{LABEL_QUIET_HOURS}: {format_interval_quiet_hours_status(interval_quiet_hours)}")
+    lines.extend(
         [
-            "当前设置",
-            f"已绑定 Key: {key_count} 个",
-            f"每日推送: {'已开启' if push_enabled else '未开启'}",
-            f"推送时间: {format_hhmm(push_time)}",
             "",
             "余额提醒:",
             f"警告 — 余额低于 {format_currency(thresholds.warning)} 时提醒",
@@ -91,6 +128,7 @@ def build_config_message(push_time: time, thresholds: UserThresholds, push_enabl
             f"严重 — 余额低于 {format_currency(thresholds.critical)} 时提醒",
         ]
     )
+    return "\n".join(lines)
 
 
 def build_config_updated_message(label: str, value: str) -> str:
@@ -101,11 +139,13 @@ def build_detail_report(
     checked_at: datetime,
     key_sections: list[str],
     push_time: time,
+    push_interval_minutes: int | None,
+    interval_quiet_hours: QuietHoursConfig | None,
 ) -> str:
     lines = [
         "OpenRouter 余额报告",
         f"查询时间: {format_local_datetime(checked_at)}",
-        f"推送时间: {format_hhmm(push_time)} | 已绑定: {len(key_sections)} 个",
+        f"每日推送时间: {format_hhmm(push_time)} | 间隔推送: {format_push_interval_status(push_interval_minutes)} | 免打扰时段: {format_interval_quiet_hours_status(interval_quiet_hours)} | 已绑定: {len(key_sections)} 个",
         "",
     ]
     lines.append("\n\n".join(key_sections))

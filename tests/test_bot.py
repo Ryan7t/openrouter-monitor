@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import time
 import unittest
 
 from openrouter_monitor.bot import (
@@ -9,6 +10,8 @@ from openrouter_monitor.bot import (
     convert_sdk_event,
     extract_command_text,
 )
+from openrouter_monitor.messages import build_help_message
+from openrouter_monitor.models import QuietHoursConfig
 
 
 class FakeNotifier:
@@ -38,6 +41,7 @@ class FakeNotifier:
 class FakeService:
     def __init__(self) -> None:
         self.notifier = FakeNotifier()
+        self.config = type("Config", (), {"service": type("Service", (), {"interval_quiet_hours": None})()})()
         self.inspect_calls: list[str] = []
         self.bind_calls: list[tuple[str, str, str | None]] = []
         self.delete_calls: list[tuple[str, str]] = []
@@ -63,12 +67,25 @@ class FakeService:
         self.config_calls.append((identity.open_id, "time", push_time))
         return "time-updated"
 
+    def update_push_interval(self, identity: object, minutes: int | None) -> str:
+        self.config_calls.append((identity.open_id, "interval", minutes))
+        return "interval-updated"
+
+    def update_push_interval_quiet_hours(self, identity: object, quiet_hours: object) -> str:
+        self.config_calls.append((identity.open_id, "interval_quiet_hours", quiet_hours))
+        return "interval-quiet-hours-updated"
+
     def update_threshold(self, identity: object, level: str, amount: float) -> str:
         self.config_calls.append((identity.open_id, level, amount))
         return "threshold-updated"
 
 
 class FeishuCommandProcessorTests(unittest.TestCase):
+    def test_help_message_explains_quiet_hours_only_affect_interval_push(self) -> None:
+        message = build_help_message()
+
+        self.assertIn("仅影响间隔推送，不影响每日推送", message)
+
     def test_group_message_without_mentions_is_ignored(self) -> None:
         service = FakeService()
         processor = FeishuCommandProcessor(service)
@@ -154,6 +171,89 @@ class FeishuCommandProcessorTests(unittest.TestCase):
         self.assertEqual(service.config_calls[0][0], "ou_456")
         self.assertEqual(service.config_calls[0][1], "time")
         self.assertEqual(str(service.config_calls[0][2]), "08:30:00")
+
+    def test_config_interval_command_updates_personal_setting(self) -> None:
+        service = FakeService()
+        processor = FeishuCommandProcessor(service)
+
+        processor.handle_message(
+            IncomingMessage(
+                message_id="om_123",
+                chat_id="oc_456",
+                chat_type="p2p",
+                message_type="text",
+                content='{"text":"/配置 间隔 30"}',
+                mentions=(),
+                open_id="ou_456",
+                user_id="u_1",
+                union_id="un_1",
+            )
+        )
+
+        self.assertEqual(service.config_calls[0], ("ou_456", "interval", 30))
+
+    def test_config_interval_command_can_disable_interval_push(self) -> None:
+        service = FakeService()
+        processor = FeishuCommandProcessor(service)
+
+        processor.handle_message(
+            IncomingMessage(
+                message_id="om_123",
+                chat_id="oc_456",
+                chat_type="p2p",
+                message_type="text",
+                content='{"text":"/配置 间隔 关闭"}',
+                mentions=(),
+                open_id="ou_456",
+                user_id="u_1",
+                union_id="un_1",
+            )
+        )
+
+        self.assertEqual(service.config_calls[0], ("ou_456", "interval", None))
+
+    def test_config_interval_quiet_hours_command_updates_personal_setting(self) -> None:
+        service = FakeService()
+        processor = FeishuCommandProcessor(service)
+
+        processor.handle_message(
+            IncomingMessage(
+                message_id="om_123",
+                chat_id="oc_456",
+                chat_type="p2p",
+                message_type="text",
+                content='{"text":"/配置 间隔静默 23:00 08:00"}',
+                mentions=(),
+                open_id="ou_456",
+                user_id="u_1",
+                union_id="un_1",
+            )
+        )
+
+        self.assertEqual(service.config_calls[0][0], "ou_456")
+        self.assertEqual(service.config_calls[0][1], "interval_quiet_hours")
+        self.assertEqual(str(service.config_calls[0][2].start), "23:00:00")
+        self.assertEqual(str(service.config_calls[0][2].end), "08:00:00")
+
+    def test_config_interval_quiet_hours_command_can_disable_personal_setting(self) -> None:
+        service = FakeService()
+        processor = FeishuCommandProcessor(service)
+
+        processor.handle_message(
+            IncomingMessage(
+                message_id="om_123",
+                chat_id="oc_456",
+                chat_type="p2p",
+                message_type="text",
+                content='{"text":"/配置 间隔静默 关闭"}',
+                mentions=(),
+                open_id="ou_456",
+                user_id="u_1",
+                union_id="un_1",
+            )
+        )
+
+        self.assertEqual(service.config_calls[0], ("ou_456", "interval_quiet_hours", None))
 
     def test_bind_command_replies_error_when_open_id_is_missing(self) -> None:
         service = FakeService()
