@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import textwrap
 import unittest
+from datetime import time
 from pathlib import Path
 
 from openrouter_monitor.config import ConfigError, load_config
@@ -29,9 +30,10 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.service.poll_interval_minutes, 60)
         self.assertEqual(config.service.timezone, "Asia/Shanghai")
-        self.assertIsNone(config.service.interval_quiet_hours)
+        self.assertEqual(config.service.interval_quiet_hours.start, time(hour=23, minute=0))
+        self.assertEqual(config.service.interval_quiet_hours.end, time(hour=8, minute=0))
         self.assertEqual(config.defaults.push_time.hour, 10)
-        self.assertEqual(config.defaults.push_time.minute, 45)
+        self.assertEqual(config.defaults.push_time.minute, 20)
         self.assertIsNone(config.defaults.push_interval_minutes)
         self.assertEqual(config.defaults.thresholds.warning, 10.0)
         self.assertEqual(config.state.users_path, "data/users.json")

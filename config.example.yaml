@@ -2,16 +2,16 @@
 service:
   poll_interval_minutes: 60
   timezone: Asia/Shanghai
-  # 可选。用户间隔推送静默窗默认值；命中该时间段时跳过间隔推送，每日固定时间推送不受影响。
-  # 用户后续可通过 /配置 间隔静默 HH:MM HH:MM 覆盖，或通过 /配置 间隔静默 关闭 单独关闭。
-  # 支持跨天，例如 23:00 -> 08:00。
-  # interval_quiet_hours:
-  #   start: "23:00"
-  #   end: "08:00"
+  # 免打扰时段默认值；命中该时间段时跳过间隔推送，每日固定时间推送不受影响。
+  # 用户可通过 /配置 间隔静默 HH:MM HH:MM 覆盖，或通过 /配置 间隔静默 关闭 单独关闭。
+  # 支持跨天，例如 23:00 -> 08:00。默认开启 23:00-08:00，设为 null 可关闭。
+  interval_quiet_hours:
+    start: "23:00"
+    end: "08:00"
 
 # 新用户默认配置。用户第一次绑定 Key 后会自动继承这组默认值。
 defaults:
-  push_time: "10:45"
+  push_time: "10:20"
   # 可选。给新绑定用户设置默认间隔推送，单位为分钟；留空表示默认不开启。
   # push_interval_minutes: 30
   thresholds:

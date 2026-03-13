@@ -73,8 +73,9 @@ def _parse_service(raw_service: object) -> ServiceConfig:
         raw_service.get("timezone", "Asia/Shanghai"),
         "service.timezone",
     )
+    raw_quiet_hours = raw_service.get("interval_quiet_hours", {"start": "23:00", "end": "08:00"})
     interval_quiet_hours = _parse_optional_quiet_hours(
-        raw_service.get("interval_quiet_hours"),
+        raw_quiet_hours,
         "service.interval_quiet_hours",
     )
     _validate_timezone(timezone_name)
@@ -89,7 +90,7 @@ def _parse_defaults(raw_defaults: object) -> DefaultsConfig:
     if not isinstance(raw_defaults, dict):
         raise ConfigError("defaults must be a mapping.")
 
-    push_time = _parse_time(raw_defaults.get("push_time", "10:45"), "defaults.push_time")
+    push_time = _parse_time(raw_defaults.get("push_time", "10:20"), "defaults.push_time")
     push_interval_minutes = _parse_optional_positive_int(
         raw_defaults.get("push_interval_minutes"),
         "defaults.push_interval_minutes",
