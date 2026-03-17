@@ -23,9 +23,10 @@ from .messages import (
 )
 from .models import AppConfig, KeyMetrics, QuietHoursConfig, UserIdentity, UserThresholds
 from .openrouter_client import OpenRouterClient, OpenRouterClientError
-from .state_store import RuntimeStateStore, UserStore
+from .state_store import BalanceTrendStore, RuntimeStateStore, UserStore
 from .utils import (
     dedupe_expired,
+    format_currency,
     format_hhmm,
     hash_api_key,
     iso_or_none,
@@ -52,6 +53,7 @@ class MonitorService:
         notifier: FeishuAppClient | None = None,
         user_store: UserStore | None = None,
         runtime_store: RuntimeStateStore | None = None,
+        trend_store: BalanceTrendStore | None = None,
         now_factory: Callable[[], datetime] | None = None,
     ) -> None:
         self.config = config
@@ -63,11 +65,13 @@ class MonitorService:
         )
         self.user_store = user_store or UserStore(config.state.users_path)
         self.runtime_store = runtime_store or RuntimeStateStore(config.state.runtime_path)
+        self.trend_store = trend_store or BalanceTrendStore(config.state.trends_path)
         self.now_factory = now_factory or self._now
         self._user_lock = threading.Lock()
         self._runtime_lock = threading.Lock()
         self._scan_lock = threading.Lock()
         self._dispatch_lock = threading.Lock()
+        self._trend_lock = threading.Lock()
         self._scheduler: BackgroundScheduler | None = None
 
     def start_scheduler(self) -> None:
@@ -324,6 +328,7 @@ class MonitorService:
 
         checked_at = self.now_factory()
         key_sections: list[str] = []
+        balance_snapshots = []
         for record in key_records:
             alias = record.get("alias")
             masked_key = mask_api_key(str(record["api_key"]))
@@ -339,6 +344,15 @@ class MonitorService:
 
             try:
                 credits = self.openrouter_client.get_credits(str(record["api_key"]))
+                if credits is not None:
+                    balance = credits.total_credits - credits.total_usage
+                    balance_snapshots.append({
+                        "key_id": hash_api_key(str(record["api_key"])),
+                        "alias": alias,
+                        "masked_key": masked_key,
+                        "balance": balance,
+                        "checked_at": checked_at,
+                    })
             except OpenRouterClientError as exc:
                 credits_error = exc.message
 
@@ -352,6 +366,10 @@ class MonitorService:
                     credits_error=credits_error,
                 )
             )
+
+        # 记录余额快照
+        if balance_snapshots:
+            self._record_balance_snapshots(balance_snapshots)
 
         return build_detail_report(
             checked_at=checked_at,
@@ -481,6 +499,37 @@ class MonitorService:
                 success_count += 1
         return success_count, len(open_ids)
 
+    def get_user_trend_report(self, open_id: str) -> str:
+        with self._user_lock:
+            user_state = self.user_store.load()
+            user_entry = self._get_user_entry(user_state, open_id)
+            if user_entry is None or not self._get_key_records(user_entry):
+                return build_no_keys_message()
+
+        with self._trend_lock:
+            trend_state = self.trend_store.load()
+            trends = trend_state.get("trends", {})
+
+        user_key_ids = []
+        with self._user_lock:
+            user_state = self.user_store.load()
+            user_entry = self._get_user_entry(user_state, open_id)
+            if user_entry:
+                for key_record in self._get_key_records(user_entry):
+                    key_id = hash_api_key(str(key_record["api_key"]))
+                    user_key_ids.append(key_id)
+
+        key_trends = []
+        for key_id in user_key_ids:
+            key_trend = trends.get(key_id, {})
+            if key_trend:
+                key_trends.append(key_trend)
+
+        if not key_trends:
+            return build_no_keys_message()
+
+        return build_trend_report(key_trends)
+
     def list_stored_user_open_ids(self) -> list[str]:
         with self._user_lock:
             state = self.user_store.load()
@@ -592,6 +641,36 @@ class MonitorService:
                 balance_state["last_notified_at"] = iso_or_none(checked_at)
 
         runtime_key["balance_alert"] = balance_state
+
+    def _record_balance_snapshots(self, snapshots: list[dict[str, Any]]) -> None:
+        now = self.now_factory()
+        seven_days_ago = now - timedelta(days=7)
+
+        with self._trend_lock:
+            trend_state = self.trend_store.load()
+            trends = trend_state.get("trends", {})
+
+            for snapshot in snapshots:
+                key_id = snapshot["key_id"]
+                key_trend = trends.setdefault(key_id, {})
+                key_trend.setdefault("alias", snapshot["alias"])
+                key_trend.setdefault("masked_key", snapshot["masked_key"])
+                
+                snapshots_list = key_trend.setdefault("snapshots", [])
+                snapshots_list.append({
+                    "balance": snapshot["balance"],
+                    "timestamp": iso_or_none(snapshot["checked_at"]),
+                })
+
+                # 清理超过7天的记录
+                filtered_snapshots = []
+                for snap in snapshots_list:
+                    snap_time = parse_datetime(snap["timestamp"])
+                    if snap_time and snap_time >= seven_days_ago:
+                        filtered_snapshots.append(snap)
+                key_trend["snapshots"] = filtered_snapshots
+
+            self.trend_store.save(trend_state)
 
     def _handle_failure(
         self,
