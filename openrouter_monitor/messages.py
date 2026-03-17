@@ -14,6 +14,7 @@ def build_help_message() -> str:
         "",
         "查看报告",
         "  /详细 — 查看所有 Key 的余额和用量",
+        "  /趋势 — 查看所有 Key 的余额趋势和历史记录",
         "",
         "管理 Key",
         "  /绑定 <Key> <备注名> — 添加一个 Key（备注名可选）",
@@ -38,7 +39,7 @@ def build_help_message() -> str:
         "  /帮助 — 查看本指南",
         "",
         "群聊中请先 @机器人 再发送指令，私聊直接发送即可。",
-        "也支持英文指令：/detail /bind /delete /config /help",
+        "也支持英文指令：/detail /trend /bind /delete /config /help",
     ]
     return "\n".join(lines)
 
@@ -198,6 +199,79 @@ def _format_key_details(metrics: KeyMetrics) -> list[str]:
         lines.append("类型: 免费 Key")
     if metrics.expires_at:
         lines.append(f"到期时间: {_format_expires_at(metrics.expires_at)}")
+
+    if metrics.limit is not None:
+        lines.append("")
+        lines.append(f"Key 限额: {format_currency(metrics.limit)}")
+        lines.append(f"Key 已用: {format_currency(metrics.usage)}")
+        lines.append(f"Key 剩余: {format_currency(metrics.limit_remaining)}")
+        lines.append(f"Key 重置: {metrics.limit_reset or '未知'}")
+
+    lines.append("")
+    lines.append(f"今日用量: {format_currency(metrics.usage_daily)}")
+    lines.append(f"本周用量: {format_currency(metrics.usage_weekly)}")
+    lines.append(f"本月用量: {format_currency(metrics.usage_monthly)}")
+
+    if metrics.rate_limit_requests and metrics.rate_limit_interval:
+        lines.append("")
+        lines.append(f"请求限制: {metrics.rate_limit_requests} 次/{metrics.rate_limit_interval}")
+        if metrics.rate_limit_note:
+            lines.append(f"限制备注: {metrics.rate_limit_note}")
+
+    return lines
+
+
+def build_trend_report(key_trends: list[dict[str, Any]]) -> str:
+    lines = [
+        "OpenRouter 余额趋势报告",
+        "",
+    ]
+
+    for trend in key_trends:
+        divider = "——————————"
+        if trend["alias"]:
+            header = f"【{trend['alias']}】{trend['masked_key']}"
+        else:
+            header = trend["masked_key"]
+        lines.extend([divider, header])
+
+        if not trend.get("snapshots"):
+            lines.append("\n暂无历史余额数据")
+            continue
+
+        # 按时间倒序排列
+        sorted_snapshots = sorted(trend["snapshots"], key=lambda x: x["timestamp"], reverse=True)
+
+        # 显示最新余额
+        latest = sorted_snapshots[0]
+        lines.append(f"\n当前余额: {format_currency(latest['balance'])}")
+
+        # 计算日均消耗
+        if len(sorted_snapshots) >= 2:
+            first = sorted_snapshots[-1]
+            last = sorted_snapshots[0]
+            first_time = parse_datetime(first["timestamp"])
+            last_time = parse_datetime(last["timestamp"])
+            if first_time and last_time:
+                days_diff = (last_time - first_time).total_seconds() / 86400
+                balance_diff = first["balance"] - last["balance"]
+                if days_diff > 0 and balance_diff > 0:
+                    daily_consumption = balance_diff / days_diff
+                    lines.append(f"日均消耗: {format_currency(daily_consumption)}")
+
+                    # 计算预计可用天数
+                    if daily_consumption > 0:
+                        remaining_days = last["balance"] / daily_consumption
+                        lines.append(f"预计可用天数: {remaining_days:.1f} 天")
+                elif balance_diff <= 0:
+                    lines.append("余额趋势: 余额未减少或在增长")
+
+        # 显示历史快照
+        lines.append("\n最近7天余额记录:")
+        for snap in sorted_snapshots[:10]:  # 最多显示10条
+            lines.append(f"  {format_local_datetime(parse_datetime(snap['timestamp']))}: {format_currency(snap['balance'])}")
+
+    return "\n".join(lines)
 
     if metrics.limit is not None:
         lines.append("")

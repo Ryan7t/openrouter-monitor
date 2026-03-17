@@ -138,6 +138,7 @@ class MonitorServiceTests(unittest.TestCase):
             state=StateConfig(
                 users_path=str(Path(temp_dir) / "users.json"),
                 runtime_path=str(Path(temp_dir) / "runtime.json"),
+                trends_path=str(Path(temp_dir) / "balance_trends.json"),
             ),
         )
 
