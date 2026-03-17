@@ -145,7 +145,8 @@ def _parse_state(raw_state: object) -> StateConfig:
 
     users_path = _require_str(raw_state.get("users_path", "data/users.json"), "state.users_path")
     runtime_path = _require_str(raw_state.get("runtime_path", "data/runtime_state.json"), "state.runtime_path")
-    return StateConfig(users_path=users_path, runtime_path=runtime_path)
+    snapshots_path = _require_str(raw_state.get("snapshots_path", "data/snapshots.json"), "state.snapshots_path")
+    return StateConfig(users_path=users_path, runtime_path=runtime_path, snapshots_path=snapshots_path)
 
 
 def _parse_threshold_values(raw_thresholds: object, path: str) -> UserThresholds:

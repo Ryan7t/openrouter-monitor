@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, time
 
-from .models import AccountCredits, KeyMetrics, QuietHoursConfig, UserThresholds
-from .utils import format_currency, format_hhmm, format_local_datetime
+from .models import AccountCredits, BalanceSnapshot, KeyMetrics, KeyTrendInfo, QuietHoursConfig, UserThresholds
+from .utils import format_currency, format_hhmm, format_local_datetime, format_short_datetime
 
 LABEL_QUIET_HOURS = "免打扰时段"
 
@@ -14,6 +14,7 @@ def build_help_message() -> str:
         "",
         "查看报告",
         "  /详细 — 查看所有 Key 的余额和用量",
+        "  /趋势 — 查看所有 Key 的余额变化趋势（最近7天）",
         "",
         "管理 Key",
         "  /绑定 <Key> <备注名> — 添加一个 Key（备注名可选）",
@@ -38,7 +39,7 @@ def build_help_message() -> str:
         "  /帮助 — 查看本指南",
         "",
         "群聊中请先 @机器人 再发送指令，私聊直接发送即可。",
-        "也支持英文指令：/detail /bind /delete /config /help",
+        "也支持英文指令：/detail /trend /bind /delete /config /help",
     ]
     return "\n".join(lines)
 
@@ -276,3 +277,68 @@ def build_failure_alert_message(
             f"检测时间: {format_local_datetime(checked_at)}",
         ]
     )
+
+
+def build_trend_report(
+    checked_at: datetime,
+    key_trends: list[KeyTrendInfo],
+) -> str:
+    lines = [
+        "OpenRouter 余额趋势报告",
+        f"查询时间: {format_local_datetime(checked_at)}",
+        f"已绑定: {len(key_trends)} 个 Key",
+        "",
+    ]
+
+    if not key_trends:
+        lines.append("暂无 Key 数据。")
+        return "\n".join(lines)
+
+    trend_sections: list[str] = []
+    for trend in key_trends:
+        trend_sections.append(_build_trend_key_section(trend))
+
+    lines.append("\n\n".join(trend_sections))
+    return "\n".join(lines)
+
+
+def _build_trend_key_section(trend: KeyTrendInfo) -> str:
+    divider = "——————————"
+    if trend.alias:
+        header = f"【{trend.alias}】{trend.masked_key}"
+    else:
+        header = trend.masked_key
+
+    lines = [divider, header, ""]
+    lines.append(f"当前余额: {format_currency(trend.current_balance)}")
+
+    if trend.daily_consumption is not None:
+        if trend.daily_consumption > 0:
+            lines.append(f"日均消耗: {format_currency(trend.daily_consumption)}")
+        elif trend.daily_consumption < 0:
+            lines.append(f"日均增长: {format_currency(-trend.daily_consumption)}")
+        else:
+            lines.append("日均消耗: $0.00（无变化）")
+    else:
+        lines.append("日均消耗: 数据不足")
+
+    if trend.estimated_days is not None:
+        if trend.estimated_days <= 0:
+            lines.append("预计可用: 余额已耗尽")
+        else:
+            lines.append(f"预计可用: 约 {trend.estimated_days:.1f} 天")
+    elif trend.daily_consumption is not None and trend.daily_consumption <= 0:
+        lines.append("预计可用: 余额在增长或持平，无法估算")
+    else:
+        lines.append("预计可用: 数据不足")
+
+    lines.append("")
+    lines.append("最近7天快照:")
+
+    if trend.snapshots:
+        for snapshot in trend.snapshots:
+            lines.append(f"  {format_short_datetime(snapshot.timestamp)} — {format_currency(snapshot.balance)}")
+    else:
+        lines.append("  暂无历史记录")
+
+    return "\n".join(lines)

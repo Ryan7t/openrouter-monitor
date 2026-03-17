@@ -53,6 +53,7 @@ class FeishuConfig:
 class StateConfig:
     users_path: str
     runtime_path: str
+    snapshots_path: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -101,6 +102,10 @@ class AccountCredits:
     total_credits: float
     total_usage: float
 
+    @property
+    def remaining(self) -> float:
+        return self.total_credits - self.total_usage
+
 
 @dataclass(slots=True, frozen=True)
 class UserConfigUpdate:
@@ -108,3 +113,21 @@ class UserConfigUpdate:
     push_interval_minutes: int | None
     push_interval_quiet_hours: QuietHoursConfig | None
     thresholds: UserThresholds
+
+
+@dataclass(slots=True, frozen=True)
+class BalanceSnapshot:
+    key_id: str
+    balance: float
+    timestamp: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class KeyTrendInfo:
+    key_id: str
+    alias: str | None
+    masked_key: str
+    current_balance: float
+    snapshots: list[BalanceSnapshot]
+    daily_consumption: float | None
+    estimated_days: float | None

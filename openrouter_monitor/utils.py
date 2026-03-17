@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import hashlib
 from datetime import date, datetime, time, timedelta
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .models import BalanceSnapshot
 
 
 def format_currency(amount: float | None) -> str:
@@ -12,6 +16,10 @@ def format_currency(amount: float | None) -> str:
 
 def format_local_datetime(value: datetime) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def format_short_datetime(value: datetime) -> str:
+    return value.strftime("%m-%d %H:%M")
 
 
 def iso_or_none(value: datetime | None) -> str | None:
@@ -70,3 +78,30 @@ def parse_iso_date(value: str | None) -> date | None:
         return date.fromisoformat(value)
     except ValueError:
         return None
+
+
+def calculate_trend_metrics(snapshots: list[BalanceSnapshot]) -> tuple[float | None, float | None]:
+    if len(snapshots) < 2:
+        return None, None
+
+    sorted_snapshots = sorted(snapshots, key=lambda s: s.timestamp)
+    first = sorted_snapshots[0]
+    last = sorted_snapshots[-1]
+
+    time_span = last.timestamp - first.timestamp
+    days = time_span.total_seconds() / 86400
+
+    if days < 0.01:
+        return None, None
+
+    balance_change = last.balance - first.balance
+    daily_consumption = -balance_change / days
+
+    if daily_consumption <= 0:
+        return daily_consumption, None
+
+    if last.balance <= 0:
+        return daily_consumption, 0.0
+
+    estimated_days = last.balance / daily_consumption
+    return daily_consumption, estimated_days
