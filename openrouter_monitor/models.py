@@ -53,6 +53,7 @@ class FeishuConfig:
 class StateConfig:
     users_path: str
     runtime_path: str
+    snapshots_path: str
 
 
 @dataclass(slots=True, frozen=True)

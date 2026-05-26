@@ -41,3 +41,4 @@ feishu:
 state:
   users_path: data/users.json
   runtime_path: data/runtime_state.json
+  snapshots_path: data/snapshots.json

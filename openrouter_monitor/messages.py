@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
+from typing import Any
 
 from .models import AccountCredits, KeyMetrics, QuietHoursConfig, UserThresholds
-from .utils import format_currency, format_hhmm, format_local_datetime
+from .utils import format_currency, format_hhmm, format_local_datetime, mask_api_key
 
 LABEL_QUIET_HOURS = "免打扰时段"
 
@@ -14,6 +15,7 @@ def build_help_message() -> str:
         "",
         "查看报告",
         "  /详细 — 查看所有 Key 的余额和用量",
+        "  /趋势 — 查看余额趋势、日均消耗和预计可用天数",
         "",
         "管理 Key",
         "  /绑定 <Key> <备注名> — 添加一个 Key（备注名可选）",
@@ -38,7 +40,7 @@ def build_help_message() -> str:
         "  /帮助 — 查看本指南",
         "",
         "群聊中请先 @机器人 再发送指令，私聊直接发送即可。",
-        "也支持英文指令：/detail /bind /delete /config /help",
+        "也支持英文指令：/detail /trend /bind /delete /config /help",
     ]
     return "\n".join(lines)
 
@@ -276,3 +278,93 @@ def build_failure_alert_message(
             f"检测时间: {format_local_datetime(checked_at)}",
         ]
     )
+
+
+def build_trend_report(
+    key_records: list[dict[str, Any]],
+    user_snapshots: dict[str, Any],
+    cutoff: datetime,
+    now: datetime,
+) -> str:
+    if not key_records:
+        return "你还没有绑定任何 Key，请发送 /绑定 <Key> 来添加。"
+
+    cutoff_iso = cutoff.isoformat()
+    sections: list[str] = []
+    for record in key_records:
+        key_id = str(record["key_id"])
+        alias = record.get("alias")
+        masked_key = mask_api_key(str(record["api_key"]))
+        if alias:
+            header = f"【{alias}】{masked_key}"
+        else:
+            header = masked_key
+
+        raw_entries = user_snapshots.get(key_id, [])
+        if not isinstance(raw_entries, list):
+            raw_entries = []
+        entries = [
+            e for e in raw_entries
+            if isinstance(e, dict) and e.get("t", "") >= cutoff_iso
+        ]
+        entries.sort(key=lambda e: e.get("t", ""), reverse=True)
+
+        lines: list[str] = ["——————————", header]
+        if not entries:
+            lines.append("暂无历史数据（查询成功后自动记录）")
+            sections.append("\n".join(lines))
+            continue
+
+        latest_balance = entries[0]["b"]
+        lines.append(f"最新余额: {format_currency(latest_balance)}")
+        lines.append("")
+        lines.append("近 7 天快照:")
+        for entry in entries:
+            t_str = _format_snapshot_time(entry.get("t", ""))
+            lines.append(f"  {t_str}  {format_currency(entry['b'])}")
+
+        if len(entries) >= 2:
+            oldest = entries[-1]
+            newest = entries[0]
+            oldest_dt = _parse_snapshot_dt(oldest.get("t", ""))
+            newest_dt = _parse_snapshot_dt(newest.get("t", ""))
+            if oldest_dt and newest_dt and newest_dt > oldest_dt:
+                days_span = (newest_dt - oldest_dt).total_seconds() / 86400
+                consumption = oldest["b"] - newest["b"]
+                if days_span > 0 and consumption > 0:
+                    daily_avg = consumption / days_span
+                    lines.append("")
+                    lines.append(f"日均消耗: {format_currency(daily_avg)}")
+                    if latest_balance > 0 and daily_avg > 0:
+                        remaining_days = latest_balance / daily_avg
+                        lines.append(f"预计可用: {remaining_days:.1f} 天")
+                    else:
+                        lines.append("预计可用: 余额已耗尽")
+                elif consumption <= 0:
+                    lines.append("")
+                    lines.append("日均消耗: 余额未下降，无法估算")
+
+        sections.append("\n".join(lines))
+
+    report_lines = [
+        "余额趋势报告",
+        f"查询时间: {format_local_datetime(now)}",
+        "",
+    ]
+    report_lines.append("\n\n".join(sections))
+    return "\n".join(report_lines)
+
+
+def _format_snapshot_time(iso_str: str) -> str:
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        return dt.strftime("%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return iso_str[:16]
+
+
+def _parse_snapshot_dt(iso_str: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(iso_str)
+    except (ValueError, TypeError):
+        return None

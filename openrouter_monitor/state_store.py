@@ -60,3 +60,15 @@ class RuntimeStateStore(JsonStateStore):
         if not isinstance(users, dict):
             data = self._clone_default()
         return data
+
+
+class SnapshotStore(JsonStateStore):
+    def __init__(self, path: str | Path) -> None:
+        super().__init__(path, {"version": 1, "users": {}})
+
+    def load(self) -> dict[str, Any]:
+        data = super().load()
+        users = data.get("users")
+        if not isinstance(users, dict):
+            data = self._clone_default()
+        return data

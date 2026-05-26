@@ -84,6 +84,9 @@ class FeishuCommandProcessor:
         if normalized_command == "detail":
             open_id = self._require_open_id(message)
             return self.service.inspect_user(open_id)
+        if normalized_command == "trend":
+            open_id = self._require_open_id(message)
+            return self.service.get_trend_report(open_id)
         if normalized_command == "bind":
             identity = self._require_identity(message)
             api_key, alias = parse_bind_arguments(remainder)
@@ -223,6 +226,8 @@ COMMAND_ALIASES = {
     "report": "detail",
     "详情": "detail",
     "详细": "detail",
+    "trend": "trend",
+    "趋势": "trend",
     "bind": "bind",
     "绑定": "bind",
     "delete": "delete",

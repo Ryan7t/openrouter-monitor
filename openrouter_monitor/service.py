@@ -23,7 +23,7 @@ from .messages import (
 )
 from .models import AppConfig, KeyMetrics, QuietHoursConfig, UserIdentity, UserThresholds
 from .openrouter_client import OpenRouterClient, OpenRouterClientError
-from .state_store import RuntimeStateStore, UserStore
+from .state_store import RuntimeStateStore, SnapshotStore, UserStore
 from .utils import (
     dedupe_expired,
     format_hhmm,
@@ -52,6 +52,7 @@ class MonitorService:
         notifier: FeishuAppClient | None = None,
         user_store: UserStore | None = None,
         runtime_store: RuntimeStateStore | None = None,
+        snapshot_store: SnapshotStore | None = None,
         now_factory: Callable[[], datetime] | None = None,
     ) -> None:
         self.config = config
@@ -63,9 +64,11 @@ class MonitorService:
         )
         self.user_store = user_store or UserStore(config.state.users_path)
         self.runtime_store = runtime_store or RuntimeStateStore(config.state.runtime_path)
+        self.snapshot_store = snapshot_store or SnapshotStore(config.state.snapshots_path)
         self.now_factory = now_factory or self._now
         self._user_lock = threading.Lock()
         self._runtime_lock = threading.Lock()
+        self._snapshot_lock = threading.Lock()
         self._scan_lock = threading.Lock()
         self._dispatch_lock = threading.Lock()
         self._scheduler: BackgroundScheduler | None = None
@@ -324,6 +327,7 @@ class MonitorService:
 
         checked_at = self.now_factory()
         key_sections: list[str] = []
+        snapshots_to_record: list[tuple[str, float]] = []
         for record in key_records:
             alias = record.get("alias")
             masked_key = mask_api_key(str(record["api_key"]))
@@ -342,6 +346,10 @@ class MonitorService:
             except OpenRouterClientError as exc:
                 credits_error = exc.message
 
+            if credits is not None:
+                balance = credits.total_credits - credits.total_usage
+                snapshots_to_record.append((str(record["key_id"]), balance))
+
             key_sections.append(
                 build_detail_key_section(
                     alias=alias,
@@ -352,6 +360,9 @@ class MonitorService:
                     credits_error=credits_error,
                 )
             )
+
+        if snapshots_to_record:
+            self._record_snapshots(open_id, snapshots_to_record, checked_at)
 
         return build_detail_report(
             checked_at=checked_at,
@@ -965,6 +976,61 @@ class MonitorService:
                 return
             runtime_user["next_interval_push_at"] = None
             self.runtime_store.save(runtime_state)
+
+    def get_trend_report(self, open_id: str) -> str:
+        with self._user_lock:
+            state = self.user_store.load()
+            user_entry = self._get_user_entry(state, open_id)
+            if user_entry is None or not self._get_key_records(user_entry):
+                return build_no_keys_message()
+            key_records = [dict(item) for item in self._get_key_records(user_entry)]
+
+        now = self.now_factory()
+        cutoff = now - timedelta(days=7)
+        with self._snapshot_lock:
+            snap_state = self.snapshot_store.load()
+
+        user_snapshots = snap_state.get("users", {}).get(open_id, {})
+        from .messages import build_trend_report
+        return build_trend_report(key_records, user_snapshots, cutoff, now)
+
+    def _record_snapshots(
+        self,
+        open_id: str,
+        entries: list[tuple[str, float]],
+        checked_at: datetime,
+    ) -> None:
+        with self._snapshot_lock:
+            snap_state = self.snapshot_store.load()
+            users = snap_state.setdefault("users", {})
+            if not isinstance(users, dict):
+                users = {}
+                snap_state["users"] = users
+            user_snaps = users.setdefault(open_id, {})
+            if not isinstance(user_snaps, dict):
+                user_snaps = {}
+                users[open_id] = user_snaps
+
+            ts = checked_at.isoformat()
+            for key_id, balance in entries:
+                key_list = user_snaps.setdefault(key_id, [])
+                if not isinstance(key_list, list):
+                    key_list = []
+                    user_snaps[key_id] = key_list
+                key_list.append({"t": ts, "b": round(balance, 4)})
+
+            self._prune_snapshots(user_snaps, checked_at)
+            self.snapshot_store.save(snap_state)
+
+    def _prune_snapshots(self, user_snaps: dict[str, Any], now: datetime) -> None:
+        cutoff = now - timedelta(days=7)
+        cutoff_iso = cutoff.isoformat()
+        for key_id in list(user_snaps.keys()):
+            entries = user_snaps[key_id]
+            if not isinstance(entries, list):
+                user_snaps[key_id] = []
+                continue
+            user_snaps[key_id] = [e for e in entries if isinstance(e, dict) and e.get("t", "") >= cutoff_iso]
 
     def _now(self) -> datetime:
         return datetime.now(self.zoneinfo)

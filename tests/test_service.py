@@ -138,6 +138,7 @@ class MonitorServiceTests(unittest.TestCase):
             state=StateConfig(
                 users_path=str(Path(temp_dir) / "users.json"),
                 runtime_path=str(Path(temp_dir) / "runtime.json"),
+                snapshots_path=str(Path(temp_dir) / "snapshots.json"),
             ),
         )
 
@@ -741,3 +742,140 @@ class MonitorServiceTests(unittest.TestCase):
 
             self.assertIn("余额低于 $20.00 时提醒", user_one)
             self.assertIn("余额低于 $10.00 时提醒", user_two)
+
+    def test_inspect_user_records_snapshots_for_successful_credits(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = FakeOpenRouterClient()
+            client.key_responses["or-v1-abc"] = [build_metrics(8.0)]
+            client.credits_responses["or-v1-abc"] = [FakeCredits(100.0, 76.5)]
+            service = self.make_service(
+                temp_dir,
+                client=client,
+                now_values=[datetime(2026, 3, 11, 10, 0, tzinfo=TZ)],
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+
+            service.inspect_user("ou_1")
+
+            snap_state = service.snapshot_store.load()
+            user_snaps = snap_state["users"]["ou_1"]
+            from openrouter_monitor.utils import hash_api_key
+            key_id = hash_api_key("or-v1-abc")
+            self.assertEqual(len(user_snaps[key_id]), 1)
+            self.assertAlmostEqual(user_snaps[key_id][0]["b"], 23.5)
+
+    def test_inspect_user_skips_snapshot_for_failed_credits(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = FakeOpenRouterClient()
+            client.key_responses["or-v1-abc"] = [build_metrics(8.0)]
+            client.credits_responses["or-v1-abc"] = [
+                OpenRouterClientError("forbidden", "No credits")
+            ]
+            service = self.make_service(
+                temp_dir,
+                client=client,
+                now_values=[datetime(2026, 3, 11, 10, 0, tzinfo=TZ)],
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+
+            service.inspect_user("ou_1")
+
+            snap_state = service.snapshot_store.load()
+            self.assertEqual(snap_state["users"], {})
+
+    def test_trend_report_no_keys_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self.make_service(temp_dir)
+
+            report = service.get_trend_report("ou_1")
+
+            self.assertIn("没有绑定任何 Key", report)
+
+    def test_trend_report_no_snapshots_shows_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self.make_service(temp_dir)
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+
+            report = service.get_trend_report("ou_1")
+
+            self.assertIn("暂无历史数据", report)
+
+    def test_trend_report_shows_daily_avg_and_remaining_days(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = FakeOpenRouterClient()
+            client.key_responses["or-v1-abc"] = [build_metrics(8.0), build_metrics(8.0)]
+            client.credits_responses["or-v1-abc"] = [FakeCredits(100.0, 50.0), FakeCredits(100.0, 60.0)]
+            service = self.make_service(
+                temp_dir,
+                client=client,
+                now_values=[
+                    datetime(2026, 3, 10, 10, 0, tzinfo=TZ),
+                    datetime(2026, 3, 11, 10, 0, tzinfo=TZ),
+                    datetime(2026, 3, 12, 10, 0, tzinfo=TZ),
+                ],
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+
+            service.inspect_user("ou_1")
+            service.inspect_user("ou_1")
+
+            report = service.get_trend_report("ou_1")
+
+            self.assertIn("日均消耗", report)
+            self.assertIn("预计可用", report)
+            self.assertIn("余额趋势报告", report)
+
+    def test_trend_report_balance_not_decreasing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = FakeOpenRouterClient()
+            client.key_responses["or-v1-abc"] = [build_metrics(8.0), build_metrics(8.0)]
+            client.credits_responses["or-v1-abc"] = [FakeCredits(100.0, 50.0), FakeCredits(100.0, 50.0)]
+            service = self.make_service(
+                temp_dir,
+                client=client,
+                now_values=[
+                    datetime(2026, 3, 10, 10, 0, tzinfo=TZ),
+                    datetime(2026, 3, 11, 10, 0, tzinfo=TZ),
+                    datetime(2026, 3, 12, 10, 0, tzinfo=TZ),
+                ],
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+
+            service.inspect_user("ou_1")
+            service.inspect_user("ou_1")
+
+            report = service.get_trend_report("ou_1")
+
+            self.assertIn("余额未下降", report)
+
+    def test_snapshots_pruned_after_7_days(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = FakeOpenRouterClient()
+            client.key_responses["or-v1-abc"] = [build_metrics(8.0), build_metrics(8.0)]
+            client.credits_responses["or-v1-abc"] = [FakeCredits(100.0, 50.0), FakeCredits(100.0, 60.0)]
+            service = self.make_service(
+                temp_dir,
+                client=client,
+                now_values=[
+                    datetime(2026, 3, 1, 10, 0, tzinfo=TZ),
+                    datetime(2026, 3, 1, 10, 0, tzinfo=TZ),
+                    datetime(2026, 3, 9, 10, 0, tzinfo=TZ),
+                ],
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+
+            service.inspect_user("ou_1")
+            service.inspect_user("ou_1")
+
+            snap_state = service.snapshot_store.load()
+            from openrouter_monitor.utils import hash_api_key
+            key_id = hash_api_key("or-v1-abc")
+            entries = snap_state["users"]["ou_1"][key_id]
+            self.assertEqual(len(entries), 1)
+            self.assertIn("2026-03-09", entries[0]["t"])
