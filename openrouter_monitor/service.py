@@ -207,6 +207,15 @@ class MonitorService:
                     runtime_state.get("users", {}).pop(open_id, None)
                 self.runtime_store.save(runtime_state)
 
+        with self._snapshot_lock:
+            snap_state = self.snapshot_store.load()
+            user_snaps = snap_state.get("users", {}).get(open_id)
+            if isinstance(user_snaps, dict) and target["key_id"] in user_snaps:
+                del user_snaps[target["key_id"]]
+                if not user_snaps:
+                    snap_state.get("users", {}).pop(open_id, None)
+                self.snapshot_store.save(snap_state)
+
         return build_delete_success_message(
             alias=target.get("alias"),
             masked_key=mask_api_key(str(target["api_key"])),
