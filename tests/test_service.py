@@ -631,17 +631,23 @@ class MonitorServiceTests(unittest.TestCase):
     def test_interval_and_daily_dispatch_can_both_send_in_same_minute(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             client = FakeOpenRouterClient()
-            client.key_responses["or-v1-abc"] = [build_metrics(12.0)]
-            client.credits_responses["or-v1-abc"] = [FakeCredits(100.0, 50.0)]
+            client.key_responses["or-v1-abc"] = [build_metrics(12.0), build_metrics(12.0)]
+            client.credits_responses["or-v1-abc"] = [FakeCredits(100.0, 50.0), FakeCredits(100.0, 50.0)]
             notifier = FakeNotifier()
             service = self.make_service(
                 temp_dir,
                 client=client,
                 notifier=notifier,
                 now_values=[
+                    # bind_key
                     datetime(2026, 3, 11, 9, 0, tzinfo=TZ),
+                    # update_push_interval
                     datetime(2026, 3, 11, 9, 0, tzinfo=TZ),
+                    # daily_detail_dispatch: now
                     datetime(2026, 3, 11, 10, 0, tzinfo=TZ),
+                    # inspect_user for daily
+                    datetime(2026, 3, 11, 10, 0, tzinfo=TZ),
+                    # inspect_user for interval
                     datetime(2026, 3, 11, 10, 0, tzinfo=TZ),
                 ],
             )
@@ -879,3 +885,92 @@ class MonitorServiceTests(unittest.TestCase):
             entries = snap_state["users"]["ou_1"][key_id]
             self.assertEqual(len(entries), 1)
             self.assertIn("2026-03-09", entries[0]["t"])
+
+    def test_daily_and_interval_simultaneous_trigger_records_two_snapshots(self) -> None:
+        """When daily push and interval push fire in the same minute, each records its own snapshot."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = FakeOpenRouterClient()
+            client.key_responses["or-v1-abc"] = [
+                build_metrics(12.0),
+                build_metrics(12.0),
+            ]
+            client.credits_responses["or-v1-abc"] = [
+                FakeCredits(100.0, 50.0),
+                FakeCredits(100.0, 52.0),
+            ]
+            notifier = FakeNotifier()
+            service = self.make_service(
+                temp_dir,
+                client=client,
+                notifier=notifier,
+                now_values=[
+                    # bind_key
+                    datetime(2026, 3, 11, 8, 0, tzinfo=TZ),
+                    # update_push_interval
+                    datetime(2026, 3, 11, 8, 0, tzinfo=TZ),
+                    # daily_detail_dispatch: now = 9:00
+                    datetime(2026, 3, 11, 9, 0, tzinfo=TZ),
+                    # inspect_user for daily: checked_at
+                    datetime(2026, 3, 11, 9, 0, 0, tzinfo=TZ),
+                    # inspect_user for interval: checked_at
+                    datetime(2026, 3, 11, 9, 0, 1, tzinfo=TZ),
+                ],
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+            service.update_push_time(identity, time(hour=9, minute=0))
+            service.update_push_interval(identity, 30)
+
+            # Force next_interval_push_at to be before dispatch time
+            runtime = service.runtime_store.load()
+            runtime["users"]["ou_1"]["next_interval_push_at"] = datetime(
+                2026, 3, 11, 8, 30, tzinfo=TZ
+            ).isoformat()
+            service.runtime_store.save(runtime)
+
+            service.daily_detail_dispatch()
+
+            # Both daily and interval should have sent messages
+            self.assertEqual(len(notifier.messages), 2)
+
+            # Snapshots should have two entries
+            from openrouter_monitor.utils import hash_api_key
+
+            snap_state = service.snapshot_store.load()
+            key_id = hash_api_key("or-v1-abc")
+            entries = snap_state["users"]["ou_1"][key_id]
+            self.assertEqual(len(entries), 2)
+
+    def test_daily_only_trigger_records_one_snapshot(self) -> None:
+        """When only daily push fires (no interval configured), only one snapshot is recorded."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = FakeOpenRouterClient()
+            client.key_responses["or-v1-abc"] = [build_metrics(12.0)]
+            client.credits_responses["or-v1-abc"] = [FakeCredits(100.0, 50.0)]
+            notifier = FakeNotifier()
+            service = self.make_service(
+                temp_dir,
+                client=client,
+                notifier=notifier,
+                now_values=[
+                    # bind_key
+                    datetime(2026, 3, 11, 8, 0, tzinfo=TZ),
+                    # daily_detail_dispatch: now = 9:00
+                    datetime(2026, 3, 11, 9, 0, tzinfo=TZ),
+                    # inspect_user for daily
+                    datetime(2026, 3, 11, 9, 0, tzinfo=TZ),
+                ],
+            )
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+            service.update_push_time(identity, time(hour=9, minute=0))
+
+            service.daily_detail_dispatch()
+
+            self.assertEqual(len(notifier.messages), 1)
+            from openrouter_monitor.utils import hash_api_key
+
+            snap_state = service.snapshot_store.load()
+            key_id = hash_api_key("or-v1-abc")
+            entries = snap_state["users"]["ou_1"][key_id]
+            self.assertEqual(len(entries), 1)

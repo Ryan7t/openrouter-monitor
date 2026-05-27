@@ -429,7 +429,6 @@ class MonitorService:
                     continue
 
                 runtime_user = self._ensure_runtime_user(runtime_state, open_id)
-                report: str | None = None
 
                 push_time = self._read_push_time(settings)
                 push_interval_quiet_hours = self._read_push_interval_quiet_hours(settings)
@@ -440,8 +439,8 @@ class MonitorService:
                     and last_daily_push_date != now.date()
                 )
                 if daily_due:
-                    report = report or self.inspect_user(open_id)
-                    sent = self.push_private_text(open_id, report)
+                    daily_report = self.inspect_user(open_id)
+                    sent = self.push_private_text(open_id, daily_report)
                     if sent:
                         runtime_user["last_daily_push_date"] = current_date
 
@@ -458,8 +457,8 @@ class MonitorService:
                             self._next_interval_dispatch_after_quiet_hours(now, push_interval_quiet_hours)
                         )
                     else:
-                        report = report or self.inspect_user(open_id)
-                        sent = self.push_private_text(open_id, report)
+                        interval_report = self.inspect_user(open_id)
+                        sent = self.push_private_text(open_id, interval_report)
                         if sent:
                             runtime_user["next_interval_push_at"] = iso_or_none(
                                 self._calculate_next_interval_push_at(now, push_interval_minutes)
