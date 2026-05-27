@@ -19,6 +19,7 @@ from .messages import (
     build_detail_report,
     build_failure_alert_message,
     build_no_keys_message,
+    build_rename_success_message,
     build_threshold_alert_message,
 )
 from .models import AppConfig, KeyMetrics, QuietHoursConfig, UserIdentity, UserThresholds
@@ -177,6 +178,43 @@ class MonitorService:
             thresholds=thresholds,
             existed=existed,
         )
+
+    def rename_key(self, open_id: str, selector: str, new_alias: str) -> str:
+        normalized_selector = selector.strip()
+        if not normalized_selector:
+            raise UserCommandError("请指定要重命名的 Key，例如: /重命名 旧备注名 新备注名")
+        normalized_alias = self._normalize_alias(new_alias)
+
+        with self._user_lock:
+            state = self.user_store.load()
+            user_entry = self._get_user_entry(state, open_id)
+            if user_entry is None or not self._get_key_records(user_entry):
+                raise UserCommandError(build_no_keys_message())
+
+            keys = self._get_key_records(user_entry)
+            target = self._match_key_for_rename(keys, normalized_selector)
+            self._assert_alias_available(keys, normalized_alias, target["key_id"])
+            old_alias = target.get("alias")
+            target["alias"] = normalized_alias
+            target["updated_at"] = iso_or_none(self.now_factory())
+            self.user_store.save(state)
+
+        return build_rename_success_message(
+            old_alias=old_alias,
+            new_alias=normalized_alias,
+            masked_key=mask_api_key(str(target["api_key"])),
+        )
+
+    def _match_key_for_rename(self, keys: list[dict[str, Any]], selector: str) -> dict[str, Any]:
+        alias_matches = [item for item in keys if item.get("alias") == selector]
+        if alias_matches:
+            return alias_matches[0]
+
+        full_key_matches = [item for item in keys if str(item["api_key"]) == selector]
+        if full_key_matches:
+            return full_key_matches[0]
+
+        raise UserCommandError("没有找到匹配的 Key，请使用当前备注名或完整 Key 来定位。")
 
     def delete_key(self, open_id: str, selector: str) -> str:
         normalized_selector = selector.strip()
@@ -703,6 +741,8 @@ class MonitorService:
         normalized = alias.strip()
         if not normalized:
             raise UserCommandError("备注名不能为空。")
+        if " " in normalized:
+            raise UserCommandError("备注名不能包含空格。")
         return normalized
 
     def _ensure_user_entry(self, state: dict[str, Any], identity: UserIdentity) -> dict[str, Any]:

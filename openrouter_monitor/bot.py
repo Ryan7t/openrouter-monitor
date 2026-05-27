@@ -94,6 +94,10 @@ class FeishuCommandProcessor:
         if normalized_command == "delete":
             open_id = self._require_open_id(message)
             return self.service.delete_key(open_id, remainder)
+        if normalized_command == "rename":
+            open_id = self._require_open_id(message)
+            selector, new_alias = parse_rename_arguments(remainder)
+            return self.service.rename_key(open_id, selector, new_alias)
         if normalized_command == "config":
             identity = self._require_identity(message)
             return self._handle_config(identity, remainder)
@@ -233,6 +237,8 @@ COMMAND_ALIASES = {
     "delete": "delete",
     "remove": "delete",
     "删除": "delete",
+    "rename": "rename",
+    "重命名": "rename",
     "config": "config",
     "配置": "config",
     "help": "help",
@@ -275,20 +281,38 @@ def parse_bind_arguments(remainder: str) -> tuple[str, str | None]:
     if not remainder:
         raise UserCommandError("请提供要绑定的 Key，例如: /绑定 sk-or-v1-xxx 我的Key")
 
-    api_key, _, tail = remainder.partition(" ")
-    if not api_key:
+    parts = remainder.split()
+    if not parts:
         raise UserCommandError("请提供要绑定的 Key，例如: /绑定 sk-or-v1-xxx 我的Key")
-    if not tail.strip():
-        return api_key.strip(), None
 
-    alias_text = tail.strip()
-    # 兼容旧的 别名=xxx / alias=xxx 写法
+    api_key = parts[0]
+    if len(parts) == 1:
+        return api_key, None
+    if len(parts) > 2:
+        raise UserCommandError("备注名不能包含空格。用法: /绑定 <Key> <备注名>")
+
+    alias_text = parts[1]
     match = re.fullmatch(r"(?:(?:别名|备注名?|alias)=(.+))", alias_text, flags=re.IGNORECASE)
     if match:
         alias_text = match.group(1).strip()
     if not alias_text:
         raise UserCommandError("备注名不能为空。")
-    return api_key.strip(), alias_text
+    return api_key, alias_text
+
+
+def parse_rename_arguments(remainder: str) -> tuple[str, str]:
+    if not remainder:
+        raise UserCommandError("请提供旧备注名（或完整Key）和新备注名，例如: /重命名 旧备注名 新备注名")
+
+    parts = remainder.split()
+    if len(parts) < 2:
+        raise UserCommandError("请同时提供旧备注名和新备注名，例如: /重命名 旧备注名 新备注名")
+    if len(parts) > 2:
+        raise UserCommandError("备注名不能包含空格，请检查参数。用法: /重命名 旧备注名 新备注名")
+
+    selector = parts[0]
+    new_alias = parts[1]
+    return selector, new_alias
 
 
 def extract_command_text(content: str, mentions: tuple[IncomingMention, ...]) -> str:

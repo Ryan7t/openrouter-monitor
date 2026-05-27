@@ -18,8 +18,9 @@ def build_help_message() -> str:
         "  /趋势 — 查看余额趋势、日均消耗和预计可用天数",
         "",
         "管理 Key",
-        "  /绑定 <Key> <备注名> — 添加一个 Key（备注名可选）",
+        "  /绑定 <Key> <备注名> — 添加一个 Key（备注名可选，不能含空格）",
         "  /删除 <备注名或完整Key> — 删除已绑定的 Key",
+        "  /重命名 <旧备注名或完整Key> <新备注名> — 修改备注名（不能含空格）",
         "",
         "推送设置",
         "  /配置 推送时间 09:00 — 设置每日报告的推送时间",
@@ -40,7 +41,7 @@ def build_help_message() -> str:
         "  /帮助 — 查看本指南",
         "",
         "群聊中请先 @机器人 再发送指令，私聊直接发送即可。",
-        "也支持英文指令：/detail /trend /bind /delete /config /help",
+        "也支持英文指令：/detail /trend /bind /delete /rename /config /help",
     ]
     return "\n".join(lines)
 
@@ -92,6 +93,15 @@ def build_bind_success_message(
             "修改设置请发送 /配置，查看帮助请发送 /帮助。",
         ]
     )
+    return "\n".join(lines)
+
+
+def build_rename_success_message(old_alias: str | None, new_alias: str, masked_key: str) -> str:
+    lines = ["重命名成功"]
+    if old_alias:
+        lines.append(f"原备注名: {old_alias}")
+    lines.append(f"新备注名: {new_alias}")
+    lines.append(f"Key: {masked_key}")
     return "\n".join(lines)
 
 

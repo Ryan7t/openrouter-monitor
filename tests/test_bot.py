@@ -45,6 +45,7 @@ class FakeService:
         self.inspect_calls: list[str] = []
         self.bind_calls: list[tuple[str, str, str | None]] = []
         self.delete_calls: list[tuple[str, str]] = []
+        self.rename_calls: list[tuple[str, str, str]] = []
         self.config_calls: list[tuple[str, str, object]] = []
 
     def inspect_user(self, open_id: str) -> str:
@@ -78,6 +79,13 @@ class FakeService:
     def update_threshold(self, identity: object, level: str, amount: float) -> str:
         self.config_calls.append((identity.open_id, level, amount))
         return "threshold-updated"
+
+    def rename_key(self, open_id: str, selector: str, new_alias: str) -> str:
+        self.rename_calls.append((open_id, selector, new_alias))
+        return "rename-output"
+
+    def get_trend_report(self, open_id: str) -> str:
+        return "trend-output"
 
 
 class FeishuCommandProcessorTests(unittest.TestCase):
@@ -282,6 +290,68 @@ class FeishuCommandProcessorTests(unittest.TestCase):
         )
 
         self.assertEqual(result, "/详细")
+
+    def test_rename_command_parses_selector_and_new_alias(self) -> None:
+        service = FakeService()
+        processor = FeishuCommandProcessor(service)
+
+        processor.handle_message(
+            IncomingMessage(
+                message_id="om_123",
+                chat_id="oc_456",
+                chat_type="p2p",
+                message_type="text",
+                content='{"text":"/重命名 生产 主生产"}',
+                mentions=(),
+                open_id="ou_456",
+                user_id="u_1",
+                union_id="un_1",
+            )
+        )
+
+        self.assertEqual(service.rename_calls, [("ou_456", "生产", "主生产")])
+        self.assertIn("rename-output", service.notifier.messages[0]["text"])
+
+    def test_rename_command_with_full_key_as_selector(self) -> None:
+        service = FakeService()
+        processor = FeishuCommandProcessor(service)
+
+        processor.handle_message(
+            IncomingMessage(
+                message_id="om_123",
+                chat_id="oc_456",
+                chat_type="p2p",
+                message_type="text",
+                content='{"text":"/rename sk-or-v1-abcdef 新名称"}',
+                mentions=(),
+                open_id="ou_456",
+                user_id="u_1",
+                union_id="un_1",
+            )
+        )
+
+        self.assertEqual(service.rename_calls, [("ou_456", "sk-or-v1-abcdef", "新名称")])
+
+    def test_rename_command_error_when_missing_new_alias(self) -> None:
+        service = FakeService()
+        processor = FeishuCommandProcessor(service)
+
+        processor.handle_message(
+            IncomingMessage(
+                message_id="om_123",
+                chat_id="oc_456",
+                chat_type="p2p",
+                message_type="text",
+                content='{"text":"/重命名 生产"}',
+                mentions=(),
+                open_id="ou_456",
+                user_id="u_1",
+                union_id="un_1",
+            )
+        )
+
+        self.assertEqual(service.rename_calls, [])
+        self.assertIn("旧备注名", service.notifier.messages[0]["text"])
 
 
 class ConvertSdkEventTests(unittest.TestCase):

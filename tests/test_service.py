@@ -214,6 +214,73 @@ class MonitorServiceTests(unittest.TestCase):
             self.assertIn("删除成功", message)
             self.assertIn("当前已无绑定的 Key", message)
 
+    def test_rename_key_by_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self.make_service(temp_dir)
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+
+            message = service.rename_key("ou_1", "生产", "主生产")
+
+            self.assertIn("重命名成功", message)
+            self.assertIn("原备注名: 生产", message)
+            self.assertIn("新备注名: 主生产", message)
+
+    def test_rename_key_by_full_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self.make_service(temp_dir)
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc")
+
+            message = service.rename_key("ou_1", "or-v1-abc", "新名字")
+
+            self.assertIn("重命名成功", message)
+            self.assertIn("新备注名: 新名字", message)
+
+    def test_rename_key_rejects_duplicate_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self.make_service(temp_dir)
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+            service.bind_key(identity, "or-v1-def", "测试")
+
+            with self.assertRaisesRegex(UserCommandError, "备注名「生产」已被占用"):
+                service.rename_key("ou_1", "测试", "生产")
+
+    def test_rename_key_fails_when_no_keys_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self.make_service(temp_dir)
+            identity = UserIdentity(open_id="ou_1")
+
+            with self.assertRaisesRegex(UserCommandError, "没有绑定任何 Key"):
+                service.rename_key("ou_1", "不存在", "新名字")
+
+    def test_rename_key_fails_when_selector_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self.make_service(temp_dir)
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+
+            with self.assertRaisesRegex(UserCommandError, "没有找到匹配的 Key"):
+                service.rename_key("ou_1", "不存在的名字", "新名字")
+
+    def test_bind_key_rejects_alias_with_spaces(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self.make_service(temp_dir)
+            identity = UserIdentity(open_id="ou_1")
+
+            with self.assertRaisesRegex(UserCommandError, "不能包含空格"):
+                service.bind_key(identity, "or-v1-abc", "my key")
+
+    def test_rename_key_rejects_new_alias_with_spaces(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self.make_service(temp_dir)
+            identity = UserIdentity(open_id="ou_1")
+            service.bind_key(identity, "or-v1-abc", "生产")
+
+            with self.assertRaisesRegex(UserCommandError, "不能包含空格"):
+                service.rename_key("ou_1", "生产", "new name")
+
     def test_inspect_user_includes_all_keys_and_masks_plaintext(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             client = FakeOpenRouterClient()
